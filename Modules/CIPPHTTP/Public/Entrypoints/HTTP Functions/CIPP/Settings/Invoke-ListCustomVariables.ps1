@@ -63,6 +63,20 @@ function Invoke-ListCustomVariables {
                 Category    = 'tenant'
             },
             @{
+                Name        = 'globaladminsid'
+                Variable    = '%globaladminsid%'
+                Description = 'The tenant Global Administrator role SID, from the cached directory roles'
+                Type        = 'reserved'
+                Category    = 'tenant'
+            },
+            @{
+                Name        = 'deviceadminsid'
+                Variable    = '%deviceadminsid%'
+                Description = 'The tenant Microsoft Entra Joined Device Local Administrator role SID, from the cached directory roles'
+                Type        = 'reserved'
+                Category    = 'tenant'
+            },
+            @{
                 Name        = 'partnertenantid'
                 Variable    = '%partnertenantid%'
                 Description = 'The partner tenant ID'
@@ -217,9 +231,9 @@ function Invoke-ListCustomVariables {
         # in it resolves against whichever tenant it lands on. So a caller editing one needs every
         # variable *name* that exists anywhere, not the set belonging to whichever tenant happens to
         # be selected. Values are deliberately not returned here: they differ per tenant, so there is
-        # no single correct one to show.
+        # no single correct one to show. Only names from tenants the caller's roles cover are listed.
         if ($Request.Query.allTenants -eq $true) {
-            $EveryCustomVariable = Get-CIPPAzDataTableEntity @ReplaceTable
+            $EveryCustomVariable = Get-CIPPAzDataTableEntity @ReplaceTable | Select-CippAllowedTenantData -TenantProperty 'PartitionKey'
             foreach ($Variable in $EveryCustomVariable) {
                 if (-not $Variable.RowKey -or -not $Variable.Value) { continue }
                 # Names already added as reserved or global keep their own description and value.
@@ -274,8 +288,13 @@ function Invoke-ListCustomVariables {
 
                 # Resolved through Get-CIPPTextReplacement so there is one definition of what each
                 # token means. System tokens are skipped: they are expanded on the endpoint, not here.
+                # Role SIDs throw when uncached, so they resolve one at a time and cannot block the rest.
+                $RoleSidVariables = @($VariableMap.Values | Where-Object { $_.Type -eq 'reserved' -and $_.Variable -match '^%(globaladmin|deviceadmin)sid%$' })
+                foreach ($Variable in $RoleSidVariables) {
+                    try { $Variable.Value = Get-CIPPTextReplacement -TenantFilter $TenantFilter -Text $Variable.Variable } catch { Write-Information $_.Exception.Message }
+                }
                 $Resolvable = @($VariableMap.Values | Where-Object {
-                        $_.Type -eq 'reserved' -and $_.Category -ne 'system'
+                        $_.Type -eq 'reserved' -and $_.Category -ne 'system' -and $_ -notin $RoleSidVariables
                     })
                 if ($Resolvable.Count -gt 0) {
                     # Joined into one call by a separator no domain, GUID or URL can contain.

@@ -8,10 +8,20 @@ Function Invoke-ExecGDAPRemoveGArole {
     [CmdletBinding()]
     param($Request, $TriggerMetadata)
 
+    $APIName = $Request.Params.CIPPEndpoint
     $GDAPID = $Request.Query.GDAPId ?? $Request.Body.GDAPId
+    # The id is placed in a Graph URL, so it must be a relationship id and nothing else.
+    if (-not (Test-CIPPGDAPRelationshipId -Id "$GDAPID")) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ Results = 'Invalid relationship id' } })
+    }
 
+    # Multi-partner: act as the relationship's source partner (defaults to the primary)
+    $PartnerTenantId = $Request.Query.partnerTenantId ?? $Request.Body.partnerTenantId
+    if (!$PartnerTenantId -or -not (Get-CIPPPartnerTenantList | Where-Object { $_.partnerTenantId -eq $PartnerTenantId })) {
+        $PartnerTenantId = $env:TenantID
+    }
     try {
-        $CheckActive = New-GraphGetRequest -NoAuthCheck $True -uri "https://graph.microsoft.com/beta/tenantRelationships/delegatedAdminRelationships/$($GDAPID)" -tenantid $env:TenantID
+        $CheckActive = New-GraphGetRequest -NoAuthCheck $True -uri "https://graph.microsoft.com/beta/tenantRelationships/delegatedAdminRelationships/$($GDAPID)" -tenantid $PartnerTenantId
         if ($CheckActive.status -eq 'active' -AND '62e90394-69f5-4237-9190-012177145e10' -in $CheckActive.accessDetails.unifiedRoles.roleDefinitionId) {
             $AddedHeader = @{'If-Match' = $CheckActive.'@odata.etag' }
 
@@ -23,11 +33,13 @@ Function Invoke-ExecGDAPRemoveGArole {
                 }
             } | ConvertTo-Json -Depth 3
 
-            New-GraphPOSTRequest -NoAuthCheck $True -uri "https://graph.microsoft.com/beta/tenantRelationships/delegatedAdminRelationships/$($GDAPID)" -tenantid $env:TenantID -type PATCH -body $RawJSON -AddedHeaders $AddedHeader
+            New-GraphPOSTRequest -NoAuthCheck $True -uri "https://graph.microsoft.com/beta/tenantRelationships/delegatedAdminRelationships/$($GDAPID)" -tenantid $PartnerTenantId -type PATCH -body $RawJSON -AddedHeaders $AddedHeader
 
             $Message = "Removed Global Administrator from $($GDAPID)"
             Write-LogMessage -headers $Request.Headers -API $APINAME -message $Message -Sev 'Info'
+            $StatusCode = [HttpStatusCode]::OK
         } else {
+            $StatusCode = [HttpStatusCode]::BadRequest
             if ($CheckActive.status -ne 'active') {
                 $Message = "Relationship status is currently $($CheckActive.status), it is not possible to remove the Global Administrator role in this state."
             }
@@ -39,13 +51,14 @@ Function Invoke-ExecGDAPRemoveGArole {
         $Message = "Unexpected error patching GDAP relationship: $($_.Exception.Message)"
         Write-Host "GDAP ERROR: $($_.Exception.Message)"
         Write-LogMessage -headers $Request.Headers -API $APINAME -tenant $env:TenantID -message "$($Message): $($_.Exception.Message)" -Sev 'Error'
+        $StatusCode = [HttpStatusCode]::InternalServerError
     }
 
     $body = @{
         Message = $Message
     }
     return ([HttpResponseContext]@{
-            StatusCode = [HttpStatusCode]::OK
+            StatusCode = $StatusCode
             Body       = $body
         })
 }

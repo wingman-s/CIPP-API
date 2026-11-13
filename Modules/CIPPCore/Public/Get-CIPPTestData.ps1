@@ -38,21 +38,9 @@ function Get-CIPPTestData {
         the TTL. Per-call-site lists measured several times worse than one shared per-type entry.
         Fields belong to the type — see Get-CippTestDataFieldManifest.
 
-    .PARAMETER NoProjection
-        Return every field, ignoring the manifest.
-
-        Required for the custom-script sandbox (Get-CippSandboxData): those scripts are
-        customer-authored, so the fields they read are unknowable and a manifest built from our
-        own tests would silently hand them incomplete records. Any caller fetching data on behalf
-        of code we did not write must pass this.
-
     .EXAMPLE
         Get-CIPPTestData -TenantFilter $Tenant -Type 'Users'
-        Normal use: the manifest decides the fields. This is what tests should do.
-
-    .EXAMPLE
-        Get-CIPPTestData -TenantFilter $Tenant -Type 'Users' -NoProjection
-        Every field. For callers serving code we did not author.
+        Normal use: the manifest decides the fields. Custom-script sandbox data uses it too.
 
     .NOTES
         Verifying a change: "0 errored" proves nothing, because the failure modes here are silent
@@ -76,8 +64,9 @@ function Get-CIPPTestData {
         [Parameter(Mandatory = $false)]
         [string[]]$Fields,
 
+        # Emit records page by page without caching them; for one-pass reads of fields too large to keep
         [Parameter(Mandatory = $false)]
-        [switch]$NoProjection
+        [switch]$Stream
     )
 
     # Enforce tenant lock when running inside custom script execution
@@ -90,10 +79,7 @@ function Get-CIPPTestData {
     }
 
     # Resolve the field set: an explicit -Fields wins, otherwise consult the per-type manifest.
-    # -NoProjection suppresses both (the sandbox path must never receive projected records).
-    $EffectiveFields = if ($NoProjection) {
-        $null
-    } elseif ($Fields) {
+    $EffectiveFields = if ($Fields) {
         $Fields
     } else {
         Get-CippTestDataFieldManifest -Type $Type
@@ -113,12 +99,19 @@ function Get-CIPPTestData {
     if ([CIPP.TestDataCache]::TryGet($CacheKey, [ref]$CachedValue)) {
         return $CachedValue
     }
-
-    $Data = if ($NormalizedFields) {
-        New-CIPPDbRequest -TenantFilter $TenantFilter -Type $Type -Fields $NormalizedFields
-    } else {
-        New-CIPPDbRequest -TenantFilter $TenantFilter -Type $Type
+    # Whole records already loaded (sandbox) carry every projected field; don't parse the type a second time.
+    if ($NormalizedFields -and [CIPP.TestDataCache]::TryGet(('{0}|{1}' -f $TenantFilter, $Type), [ref]$CachedValue, $false)) {
+        return $CachedValue
     }
+
+    $Request = @{ TenantFilter = $TenantFilter; Type = $Type; PageSize = 1000 }
+    if ($NormalizedFields) { $Request.Fields = $NormalizedFields }
+    if ($Stream) {
+        New-CIPPDbRequest @Request
+        return
+    }
+
+    $Data = New-CIPPDbRequest @Request
 
     [CIPP.TestDataCache]::Set($CacheKey, $Data)
 

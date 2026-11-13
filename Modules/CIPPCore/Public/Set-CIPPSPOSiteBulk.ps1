@@ -53,6 +53,7 @@ function Set-CIPPSPOSiteBulk {
     $TokenSplat = @{ tenantid = $TenantFilter; scope = "$AdminUrl/.default" }
     if ($UseCertificate) { $TokenSplat['AsApp'] = $true; $TokenSplat['UseCertificate'] = $true }
     $Authorization = (Get-GraphToken @TokenSplat).Authorization
+    $UserAgent = Get-CippUserAgent -SharePoint
 
     $AllowedTypes = @('Boolean', 'String', 'Int32', 'Int64')
     $EnumProperties = @('SharingCapability', 'DefaultSharingLinkType', 'DefaultLinkPermission', 'SharingDomainRestrictionMode', 'ConditionalAccessPolicy')
@@ -91,6 +92,7 @@ function Set-CIPPSPOSiteBulk {
         $Headers = [System.Collections.Generic.Dictionary[string, string]]::new()
         $Headers['Authorization'] = $Authorization
         $Headers['Accept'] = 'application/json;odata=verbose'
+        $Headers['User-Agent'] = $UserAgent
         $Request.Headers = $Headers
 
         $Requests.Add($Request)
@@ -101,7 +103,7 @@ function Set-CIPPSPOSiteBulk {
 
     if (-not $PSCmdlet.ShouldProcess("$($Requests.Count) sites", 'Set Site Properties (bulk)')) { return @() }
 
-    $Results = [CIPP.CIPPRestClient]::SendConcurrent($Requests, $MaxConcurrency, $MaxRetries)
+    $Results = [CIPP.CIPPRestClient]::SendConcurrent($Requests, $MaxConcurrency, $MaxRetries, ($PSCmdlet.PipelineStopToken ?? $global:CraftPipelineStopToken))
 
     @(foreach ($Result in $Results) {
             $Site = $RequestSites[$Result.Index]

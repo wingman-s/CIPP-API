@@ -17,29 +17,32 @@ function Invoke-ExecGenerateReportBuilderReport {
 
         if ($Action -eq 'delete') {
             if ([string]::IsNullOrEmpty($Body.ReportGUID)) {
+                $FailCode = [HttpStatusCode]::BadRequest
                 throw 'ReportGUID is required for deletion'
             }
             $ReportTable = Get-CippTable -tablename 'ReportBuilderReports'
-            $ExistingEntity = Get-CIPPAzDataTableEntity @ReportTable -Filter "RowKey eq '$($Body.ReportGUID)'"
+            $ExistingEntity = Get-CIPPAzDataTableEntity @ReportTable -Filter "RowKey eq '$(ConvertTo-CIPPODataFilterValue -Value $Body.ReportGUID)'" |
+                Where-Object { Test-CippTenantInScope -Tenant $_.PartitionKey }
             if ($ExistingEntity) {
                 Remove-CIPPAzDataTableEntity @ReportTable -Entity $ExistingEntity
                 # The rendered PDF sits in its own table; a large one is split across part rows, so fetch
                 # the raw head + part rows (keys only, no split markers) and hand them all to the remover.
                 $PdfTable = Get-CippTable -tablename 'ReportBuilderPdfs'
-                $PdfRows = @(Get-CIPPAzDataTableEntity @PdfTable -Filter "RowKey eq '$($Body.ReportGUID)' or OriginalEntityId eq '$($Body.ReportGUID)'" -Property PartitionKey, RowKey)
+                $PdfRows = @(Get-CIPPAzDataTableEntity @PdfTable -Filter "RowKey eq '$(ConvertTo-CIPPODataFilterValue -Value $Body.ReportGUID)' or OriginalEntityId eq '$(ConvertTo-CIPPODataFilterValue -Value $Body.ReportGUID)'" -Property PartitionKey, RowKey)
                 if ($PdfRows.Count -gt 0) { Remove-CIPPAzDataTableEntity @PdfTable -Entity $PdfRows }
                 Write-LogMessage -headers $Headers -API $APIName -message "Deleted generated report '$($Body.ReportGUID)'" -Sev 'Info'
                 $Result = @{ Results = 'Successfully deleted generated report' }
             } else {
                 $Result = @{ Results = 'Report not found' }
             }
-            $StatusCode = [HttpStatusCode]::OK
+            $StatusCode = $ExistingEntity ? [HttpStatusCode]::OK : [HttpStatusCode]::NotFound
         } else {
 
             $TenantFilter = $Body.TenantFilter ?? $Request.Query.TenantFilter
             $TemplateName = $Body.TemplateName ?? $Request.Query.TemplateName
 
             if ([string]::IsNullOrEmpty($TenantFilter)) {
+                $FailCode = [HttpStatusCode]::BadRequest
                 throw 'TenantFilter is required'
             }
 
@@ -72,7 +75,7 @@ function Invoke-ExecGenerateReportBuilderReport {
         $ErrorMessage = Get-CippException -Exception $_
         Write-LogMessage -headers $Headers -API $APIName -message "Report generation error: $($ErrorMessage.NormalizedError)" -Sev 'Error' -LogData $ErrorMessage
         $Result = @{ Results = "Error: $($ErrorMessage.NormalizedError)" }
-        $StatusCode = [HttpStatusCode]::BadRequest
+        $StatusCode = $FailCode ?? [HttpStatusCode]::InternalServerError
     }
 
     return ([HttpResponseContext]@{

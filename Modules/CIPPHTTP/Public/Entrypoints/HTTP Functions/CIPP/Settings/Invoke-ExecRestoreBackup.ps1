@@ -14,15 +14,30 @@ function Invoke-ExecRestoreBackup {
     $AzureTableTypes = @(
         [string], [int], [long], [double], [bool], [datetime], [guid], [byte[]]
     )
-    $RestrictedTables = @('AccessRoleGroups', 'AccessIPRanges', 'CustomRoles', 'DevSecrets') # tables that require superadmin to restore
+    # Only tables a CIPP backup contains (New-CIPPBackup) may be restored; keep the two lists in step.
+    $RestorableTables = @(
+        'AppPermissions', 'AccessRoleGroups', 'allowedAppRoles', 'ApiClients', 'CippReplacemap', 'CustomPowershellScripts',
+        'CustomData', 'CustomRoles', 'Config', 'CommunityRepos', 'Domains', 'GraphPresets', 'GDAPRoles', 'GDAPRoleTemplates',
+        'ExcludedLicenses', 'templates', 'standards', 'SchedulerConfig', 'Extensions', 'WebhookRules', 'ScheduledTasks',
+        'DeltaQueries', 'TenantProperties', 'TenantGroups', 'TenantGroupMembers', 'PartnerTenants', 'BaselineRollouts',
+        'Baselines', 'BaselineRolloutState', 'Tenants', 'AccessIPRanges', 'allowedUsers'
+    )
+    $RestrictedTables = @('AccessRoleGroups', 'allowedAppRoles', 'AccessIPRanges', 'allowedUsers', 'ApiClients', 'CustomRoles') # tables that require superadmin to restore
+    $SkippedTables = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-    # Resolve the calling user's roles, including Entra group-based roles
-    $CallingUser = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Request.Headers.'x-ms-client-principal')) | ConvertFrom-Json
-    if (($CallingUser.userRoles | Measure-Object).Count -eq 2 -and $CallingUser.userRoles -contains 'authenticated' -and $CallingUser.userRoles -contains 'anonymous') {
-        $CallingUser = Test-CIPPAccessUserRole -User $CallingUser
+    # Request permissions follow role impersonation and API client roles.
+    $AllowedPermissions = Get-CippRequestAllowedPermissions
+    $IsSuperAdmin = $AllowedPermissions -contains 'CIPP.SuperAdmin.ReadWrite'
+
+    # A CIPP backup is instance-wide, so a caller limited to some tenants cannot restore it.
+    if (@(Test-CIPPAccess -Request $Request -TenantList) -notcontains 'AllTenants') {
+        return ([HttpResponseContext]@{
+                StatusCode = [HttpStatusCode]::Forbidden
+                Body       = [pscustomobject]@{ 'Results' = 'Restoring a CIPP backup requires access to all tenants.' }
+            })
     }
-    $IsSuperAdmin = $CallingUser.userRoles -contains 'superadmin'
 
+    $StatusCode = [HttpStatusCode]::OK
     try {
         if ($Request.Body.BackupName -like 'CippBackup_*') {
             # Use Get-CIPPBackup which already handles fetching from blob storage
@@ -62,8 +77,8 @@ function Invoke-ExecRestoreBackup {
                     if ($_.table -eq 'Config' -and $_.PartitionKey -eq 'OffloadFunctions') {
                         return
                     }
-                    if ($RestrictedTables -contains $_.table -and -not $IsSuperAdmin) {
-                        Write-Information "Skipping restricted table '$($_.table)' - user does not have superadmin rights"
+                    if ($RestorableTables -notcontains $_.table -or ($RestrictedTables -contains $_.table -and -not $IsSuperAdmin)) {
+                        $null = $SkippedTables.Add([string]$_.table)
                         return
                     }
                     $Table = Get-CippTable -tablename $_.table
@@ -78,9 +93,10 @@ function Invoke-ExecRestoreBackup {
                 }
                 Write-LogMessage -headers $Request.Headers -API $APINAME -message "Restored backup $($Request.Body.BackupName) - $RestoredCount rows restored" -Sev 'Info'
                 $body = [pscustomobject]@{
-                    'Results' = "Successfully restored $RestoredCount rows from backup."
+                    'Results' = "Successfully restored $RestoredCount rows from backup.$(if ($SkippedTables.Count -gt 0) { " Skipped rows for tables you cannot restore: $(@($SkippedTables) -join ', ')." })"
                 }
             } else {
+                $StatusCode = [HttpStatusCode]::NotFound
                 $body = [pscustomobject]@{
                     'Results' = 'Backup not found.'
                 }
@@ -94,8 +110,8 @@ function Invoke-ExecRestoreBackup {
                 if ($line.table -eq 'Config' -and $line.PartitionKey -eq 'OffloadFunctions') {
                     continue
                 }
-                if ($RestrictedTables -contains $line.table -and -not $IsSuperAdmin) {
-                    Write-Information "Skipping restricted table '$($line.table)' - user does not have superadmin rights"
+                if ($RestorableTables -notcontains $line.table -or ($RestrictedTables -contains $line.table -and -not $IsSuperAdmin)) {
+                    $null = $SkippedTables.Add([string]$line.table)
                     continue
                 }
                 $Table = Get-CippTable -tablename $line.table
@@ -111,17 +127,18 @@ function Invoke-ExecRestoreBackup {
             Write-LogMessage -headers $Request.Headers -API $APINAME -message "Restored backup - $RestoredCount rows restored" -Sev 'Info'
 
             $body = [pscustomobject]@{
-                'Results' = "Successfully restored $RestoredCount rows from backup."
+                'Results' = "Successfully restored $RestoredCount rows from backup.$(if ($SkippedTables.Count -gt 0) { " Skipped rows for tables you cannot restore: $(@($SkippedTables) -join ', ')." })"
             }
         }
     } catch {
         Write-LogMessage -headers $Request.Headers -API $APINAME -message "Failed to restore backup: $($_.Exception.Message)" -Sev 'Error'
+        $StatusCode = [HttpStatusCode]::InternalServerError
         $body = [pscustomobject]@{'Results' = "Backup restore failed: $($_.Exception.Message)" }
     }
 
 
     return ([HttpResponseContext]@{
-            StatusCode = [HttpStatusCode]::OK
+            StatusCode = $StatusCode
             Body       = $body
         })
 

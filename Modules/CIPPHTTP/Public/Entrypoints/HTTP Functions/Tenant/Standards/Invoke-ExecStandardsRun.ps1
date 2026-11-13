@@ -14,6 +14,13 @@ function Invoke-ExecStandardsRun {
 
     $TenantFilter = $Request.Query.tenantFilter ?? 'allTenants'
     $TemplateId = $Request.Query.templateId ?? $Request.Query.TemplateId ?? '*'
+    # A request with no tenant runs against every tenant, which the dispatcher does not check.
+    try {
+        Assert-CippTenantAccess -Request $Request -TenantFilter ($TenantFilter -eq 'allTenants' ? 'AllTenants' : $TenantFilter)
+    } catch {
+        Write-LogMessage -headers $Headers -API $APIName -message "Blocked standards run: $($_.Exception.Message)" -Sev 'Warning'
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::Forbidden; Body = [pscustomobject]@{ Results = $_.Exception.Message } })
+    }
     $Table = Get-CippTable -tablename 'templates'
     $Filter = "PartitionKey eq 'StandardsTemplateV2'"
     $Templates = (Get-CIPPAzDataTableEntity @Table -Filter $Filter | Sort-Object TimeStamp).JSON | ForEach-Object {
@@ -31,21 +38,27 @@ function Invoke-ExecStandardsRun {
 
     # Call the wrapper - it handles queuing internally via Start-CIPPOrchestrator
     try {
-        $null = New-CIPPStandardsRun -TenantFilter $TenantFilter -TemplateID $TemplateId -runManually $RunManually -Force
+        $InstanceId = New-CIPPStandardsRun -TenantFilter $TenantFilter -TemplateID $TemplateId -runManually $RunManually -Force
         $TemplateName = if ($TemplateId -eq '*') { 'All' } else { "$($Templates.templateName) ($($Templates.GUID))" }
         $RunMode = if ($RunManually) { ' (Manual Only)' } else { '' }
-        $Results = "Successfully started Standards Run for tenant: $TenantFilter - Template: $TemplateName$RunMode"
+        $Results = if ("$InstanceId" -like '*-Skipped') {
+            "A Standards Run for tenant: $TenantFilter - Template: $TemplateName is already running, so this request was skipped"
+        } else {
+            "Successfully started Standards Run for tenant: $TenantFilter - Template: $TemplateName$RunMode"
+        }
         Write-LogMessage -headers $Headers -tenant $TenantFilter -API $APIName -message $Results -Sev 'Info'
+        $StatusCode = [HttpStatusCode]::OK
     } catch {
         $ErrorMessage = Get-CippException -Exception $_
         $Results = "Failed to start standards run for tenant: $TenantFilter. Error: $($ErrorMessage.NormalizedError)"
         Write-LogMessage -headers $Headers -tenant $TenantFilter -API $APIName -message $Results -Sev 'Error' -LogData $ErrorMessage
+        $StatusCode = [HttpStatusCode]::InternalServerError
     }
 
     $Results = [pscustomobject]@{'Results' = "$Results" }
 
     return ([HttpResponseContext]@{
-            StatusCode = [HttpStatusCode]::OK
+            StatusCode = $StatusCode
             Body       = $Results
         })
 

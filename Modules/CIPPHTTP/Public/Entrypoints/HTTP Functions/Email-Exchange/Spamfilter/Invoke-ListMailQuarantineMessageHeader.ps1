@@ -12,6 +12,9 @@ function Invoke-ListMailQuarantineMessageHeader {
     # Interact with query parameters or the body of the request.
     $TenantFilter = $Request.Query.tenantFilter
     $Identity = $Request.Query.Identity
+    if (-not $Identity) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ Results = 'Identity is required' } })
+    }
 
     try {
         $GraphRequest = New-ExoRequest -tenantid $TenantFilter -cmdlet 'Get-QuarantineMessageHeader' -cmdParams @{ 'Identity' = $Identity }
@@ -24,7 +27,7 @@ function Invoke-ListMailQuarantineMessageHeader {
         $StatusCode = [HttpStatusCode]::OK
     } catch {
         $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-        $StatusCode = [HttpStatusCode]::Forbidden
+        $StatusCode = [HttpStatusCode]::InternalServerError
         $Body = $ErrorMessage
     }
 

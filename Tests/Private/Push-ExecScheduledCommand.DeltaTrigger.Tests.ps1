@@ -20,14 +20,16 @@ BeforeAll {
     function Test-DeltaQueryConditions { param($Query, $Trigger, $TenantFilter, $LastTrigger) }
     function Get-CippException { param($Exception) }
     function Write-LogMessage { param($API, $tenant, $tenantid, $message, $sev, $LogData, $headers) }
-    function Set-CippScheduledTaskContext { param($TaskId) }
+    function Set-CippScheduledTaskContext { param($TaskId, $AlertReNotify, $AlertRun) }
     function Set-CippUserAgentContext { param($Headers, $Source, $TaskId) }
     function Get-Tenants { param($TenantFilter, [switch]$IncludeErrors) }
     function Get-CIPPSchedulerBlockedCommands { }
     function Send-CIPPScheduledTaskAlert { param($Results, $TaskInfo, $TenantFilter, $TaskType, $Attachments) }
-    function Clear-CIPPImmutableID { param($UserID, $TenantFilter, $APIName) }
+    # The executor only runs functions from the CIPP modules, so the command lives in a module of that name.
+    $null = New-Module -Name CIPPCore -ScriptBlock { function Clear-CIPPImmutableID { param($UserID, $TenantFilter, $APIName) } } | Import-Module -Force -PassThru
 
     . $FunctionPath
+    . (Join-Path $RepoRoot 'Modules/CIPPCore/Public/Get-CIPPScheduledTaskNextRun.ps1')
 
     $script:TaskEpoch = 1700000000
     function Get-UnixNow { [int64](([datetime]::UtcNow) - (Get-Date '1/1/1970')).TotalSeconds }
@@ -67,6 +69,10 @@ BeforeAll {
     }
 }
 
+AfterAll {
+    Remove-Module -Name CIPPCore -Force -ErrorAction SilentlyContinue
+}
+
 Describe 'Push-ExecScheduledCommand delta trigger' {
     BeforeEach {
         $script:Writes = [System.Collections.Generic.List[object]]::new()
@@ -85,11 +91,6 @@ Describe 'Push-ExecScheduledCommand delta trigger' {
         Mock -CommandName New-GraphDeltaQuery -MockWith { @{ value = @() } }
         Mock -CommandName Test-DeltaQueryConditions -MockWith { @{ ConditionsMet = $false; MatchedData = @() } }
         Mock -CommandName Clear-CIPPImmutableID -MockWith { 'cleared' }
-        # The module allow-list check reads Get-Command; only intercept the scheduled command itself
-        # so Pester's own use of Get-Command is untouched.
-        Mock -CommandName Get-Command -ParameterFilter { $Name -eq 'Clear-CIPPImmutableID' } -MockWith {
-            [pscustomobject]@{ Name = 'Clear-CIPPImmutableID'; Module = 'CIPPCore'; Parameters = @{ TenantFilter = 1; UserID = 1 } }
-        }
     }
 
     Context 'The delta lookup fails' {
@@ -119,14 +120,15 @@ Describe 'Push-ExecScheduledCommand delta trigger' {
             [int64]$Final.ScheduledTime | Should -Be ($Base + 900)
         }
 
-        It 'pulls a long stale schedule forward instead of setting a run time in the past' {
+        It 'pulls a long stale schedule forward to its next slot instead of setting a run time in the past' {
             Mock -CommandName Get-DeltaQueryUrl -MockWith { throw 'Delta Query not found.' }
 
             $Base = Get-UnixNow
             $Final = Invoke-Task -Task (New-DeltaTask -Recurrence '15m' -ScheduledTime $script:TaskEpoch)
 
-            [int64]$Final.ScheduledTime | Should -BeGreaterOrEqual ($Base + 900)
+            [int64]$Final.ScheduledTime | Should -BeGreaterThan $Base
             [int64]$Final.ScheduledTime | Should -BeLessOrEqual ($Base + 960)
+            ([int64]$Final.ScheduledTime - $script:TaskEpoch) % 900 | Should -Be 0 -Because 'a late task keeps its original slot'
         }
 
         It 'catches a failure from the delta refresh as well as the lookup' {

@@ -5,7 +5,7 @@
 
 BeforeAll {
     $script:RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
-    $Baselines = Join-Path $script:RepoRoot 'Modules/CIPPCore/Public/Baselines'
+    $Baselines = Join-Path $script:RepoRoot 'Modules/CIPPBaselines/Public'
 
     function New-CIPPDbRequest { param($TenantFilter, $Type) }
     function Write-LogMessage { param($API, $tenant, $message, $Sev, $LogData) }
@@ -18,18 +18,19 @@ BeforeAll {
     function New-CIPPGroup { param($GroupObject, $TenantFilter, $APIName) }
     function New-GraphPostRequest { param($uri, $tenantid, $type, $body) }
     function New-ExoRequest { param($tenantid, $cmdlet, $cmdParams, $useSystemMailbox, $Select, $Compliance, $AsApp) }
-    function Get-CIPPTextReplacement { param($Text, $TenantFilter) $Text }
+    function Get-CIPPTextReplacement { param($Text, $TenantFilter, [switch]$EscapeForJson) $Text }
     function Test-CIPPStandardLicense { param($StandardName, $TenantFilter, $Preset, [switch]$SkipLog) $true }
     function Set-CIPPQuarantinePolicy { param($identity, $action, $EndUserQuarantinePermissions, $ESNEnabled, $IncludeMessagesFromBlockedSenderAddress, $tenantFilter, $APIName) }
 
     . (Join-Path $script:RepoRoot 'Modules/CIPPCore/Public/Get-CIPPIntuneCompareExclusions.ps1')
     . (Join-Path $script:RepoRoot 'Modules/CIPPCore/Public/Compare-CIPPIntuneObject.ps1')
-    . (Join-Path $Baselines 'Get-CIPPBaselineCacheRows.ps1')
-    . (Join-Path $Baselines 'Test-CIPPBaselineCacheCollected.ps1')
+    . (Join-Path $Baselines 'Helpers/Get-CIPPBaselineCommand.ps1')
+    . (Join-Path $Baselines 'Helpers/Get-CIPPBaselineCacheRows.ps1')
+    . (Join-Path $Baselines 'Helpers/Test-CIPPBaselineCacheCollected.ps1')
     foreach ($Hook in @('AssignmentFilterTemplate', 'ReusableSettingsTemplate', 'GroupTemplate', 'ExchangeConnectorTemplate',
             'DeployContactTemplates', 'TenantAllowBlockListTemplate', 'QuarantineTemplate', 'SafeLinksTemplatePolicy')) {
-        . (Join-Path $Baselines "Get-CIPPBaseline${Hook}State.ps1")
-        . (Join-Path $Baselines "Invoke-CIPPBaseline${Hook}.ps1")
+        . (Join-Path $Baselines "PrepareHooks/Get-CIPPBaseline${Hook}State.ps1")
+        . (Join-Path $Baselines "Executors/Invoke-CIPPBaseline${Hook}.ps1")
     }
 
     $script:Tenant = 'contoso.onmicrosoft.com'
@@ -161,12 +162,54 @@ Describe 'Get-CIPPBaselineGroupTemplateState' {
         (Get-CIPPBaselineGroupTemplateState -Item $Item -TenantFilter $script:Tenant).Current.deployed | Should -BeTrue
     }
 
+    It 'matches a %token% name by its resolved value and hands the executor the resolved body' {
+        Mock Get-CIPPAzDataTableEntity { [PSCustomObject]@{ RowKey = 'tpl-g'; JSON = '{"displayName":"%shortname%-Sec","groupType":"security"}' } }
+        Mock Get-CIPPTextReplacement { $Text -replace '%shortname%', 'ctso' }
+        Mock New-CIPPDbRequest { @(@{ id = 'g1'; displayName = 'ctso-Sec' } | ConvertTo-Cached) }
+        $Item = [PSCustomObject]@{ Variables = [PSCustomObject]@{ groupTemplate = 'tpl-g' } }
+        $Prepared = Get-CIPPBaselineGroupTemplateState -Item $Item -TenantFilter $script:Tenant
+        $Prepared.Current.deployed | Should -BeTrue
+        $Prepared.Current.templateBody.displayName | Should -Be 'ctso-Sec'
+    }
+
     It 'reports a missing group as drift' {
         Mock Get-CIPPAzDataTableEntity { [PSCustomObject]@{ RowKey = 'tpl-g'; JSON = '{"displayName":"Sec Group","groupType":"security"}' } }
         Mock New-CIPPDbRequest { @(@{ id = 'g2'; displayName = 'Other' } | ConvertTo-Cached) }
         $Item = [PSCustomObject]@{ Variables = [PSCustomObject]@{ groupTemplate = 'tpl-g' } }
         $Prepared = Get-CIPPBaselineGroupTemplateState -Item $Item -TenantFilter $script:Tenant
         (Get-Verdict -Expected $Prepared.Expected -Current $Prepared.Current).Count | Should -BeGreaterThan 0
+    }
+
+    # Issue 1252: a bare null Current reached the executor, which did nothing and was recorded as deployed.
+    It 'grades a tenant with no groups at all as drift, not as no data' {
+        Mock Get-CIPPDbItem { [PSCustomObject]@{ RowKey = 'Groups-Count'; DataCount = 0 } }
+        Mock Get-CIPPAzDataTableEntity { [PSCustomObject]@{ RowKey = 'tpl-g'; JSON = '{"displayName":"Sec Group","groupType":"generic"}' } }
+        Mock New-CIPPDbRequest { @() }
+        $Item = [PSCustomObject]@{ Variables = [PSCustomObject]@{ groupTemplate = 'tpl-g' } }
+        $Prepared = Get-CIPPBaselineGroupTemplateState -Item $Item -TenantFilter $script:Tenant
+        $Prepared.Current.deployed | Should -BeFalse
+        $Prepared.Current.templateBody.displayName | Should -Be 'Sec Group'
+    }
+
+    It 'names the reason when the Groups cache was never collected, so the executor does not run' {
+        Mock Get-CIPPDbItem { }
+        Mock Get-CIPPAzDataTableEntity { [PSCustomObject]@{ RowKey = 'tpl-g'; JSON = '{"displayName":"Sec Group","groupType":"generic"}' } }
+        Mock New-CIPPDbRequest { @() }
+        $Item = [PSCustomObject]@{ Variables = [PSCustomObject]@{ groupTemplate = 'tpl-g' } }
+        $Prepared = Get-CIPPBaselineGroupTemplateState -Item $Item -TenantFilter $script:Tenant
+        $Prepared.Current | Should -BeNullOrEmpty
+        $Prepared.NoDataReason | Should -Match 'groups cache'
+        $Prepared.ConfigError | Should -BeNullOrEmpty
+    }
+
+    It 'names the reason when the selected template no longer exists' {
+        Mock Get-CIPPAzDataTableEntity { }
+        Mock New-CIPPDbRequest { @() }
+        $Item = [PSCustomObject]@{ Variables = [PSCustomObject]@{ groupTemplate = [PSCustomObject]@{ label = 'Sec Group'; value = 'tpl-gone' } } }
+        $Prepared = Get-CIPPBaselineGroupTemplateState -Item $Item -TenantFilter $script:Tenant
+        $Prepared.Current | Should -BeNullOrEmpty
+        $Prepared.NoDataReason | Should -Match "'Sec Group' could not be found"
+        $Prepared.ConfigError | Should -BeTrue
     }
 }
 

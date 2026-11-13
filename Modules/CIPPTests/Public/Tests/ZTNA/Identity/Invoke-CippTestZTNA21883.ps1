@@ -19,6 +19,11 @@ function Invoke-CippTestZTNA21883 {
     )
     #tested
     try {
+        if (-not (Test-CIPPStandardLicense -StandardName 'ZTNA21883' -TenantFilter $Tenant -RequiredCapabilities 'AAD_WRKLDID_P1', 'AAD_WRKLDID_P2' -SkipLog)) {
+            Add-CippTestResult -TenantFilter $Tenant -TestId 'ZTNA21883' -TestType 'Identity' -Status 'Unlicensed' -ResultMarkdown 'This tenant is not licensed for Microsoft Entra Workload ID. Required capabilities: AAD_WRKLDID_P1, AAD_WRKLDID_P2.' -Risk 'Medium' -Name 'Workload Identities are configured with risk-based policies' -UserImpact 'High' -ImplementationEffort 'Low' -Category 'Access control'
+            return
+        }
+
         # Get Conditional Access policies from cache
         $Policies = Get-CIPPTestData -TenantFilter $Tenant -Type 'ConditionalAccessPolicies'
 
@@ -30,7 +35,7 @@ function Invoke-CippTestZTNA21883 {
                 Status               = 'Skipped'
                 ResultMarkdown       = 'No Conditional Access policies found in cache.'
                 Risk                 = 'Medium'
-                Name                 = 'Workload identities configured with risk-based policies'
+                Name                 = 'Workload Identities are configured with risk-based policies'
                 UserImpact           = 'High'
                 ImplementationEffort = 'Low'
                 Category             = 'Access control'
@@ -79,7 +84,7 @@ function Invoke-CippTestZTNA21883 {
                 $policyLink = "https://entra.microsoft.com/#view/Microsoft_AAD_ConditionalAccess/PolicyBlade/policyId/$($Policy.id)"
                 $policyName = if ($Policy.displayName) { $Policy.displayName } else { 'Unnamed' }
                 $spTargets = if ($Policy.conditions.clientApplications.includeServicePrincipals) {
-                    ($Policy.conditions.clientApplications.includeServicePrincipals | Select-Object -First 3) -join ', '
+                    @($Policy.conditions.clientApplications.includeServicePrincipals.Where({ $true }, 'First', 3)) -join ', '
                     if ($Policy.conditions.clientApplications.includeServicePrincipals.Count -gt 3) {
                         $spTargets += " (and $($Policy.conditions.clientApplications.includeServicePrincipals.Count - 3) more)"
                     }
@@ -107,7 +112,7 @@ function Invoke-CippTestZTNA21883 {
             Status               = $Status
             ResultMarkdown       = $ResultMarkdown
             Risk                 = 'Medium'
-            Name                 = 'Workload identities configured with risk-based policies'
+            Name                 = 'Workload Identities are configured with risk-based policies'
             UserImpact           = 'High'
             ImplementationEffort = 'Low'
             Category             = 'Access control'
@@ -122,7 +127,7 @@ function Invoke-CippTestZTNA21883 {
             Status               = 'Failed'
             ResultMarkdown       = "❌ **Error**: $($_.Exception.Message)"
             Risk                 = 'Medium'
-            Name                 = 'Workload identities configured with risk-based policies'
+            Name                 = 'Workload Identities are configured with risk-based policies'
             UserImpact           = 'High'
             ImplementationEffort = 'Low'
             Category             = 'Access control'

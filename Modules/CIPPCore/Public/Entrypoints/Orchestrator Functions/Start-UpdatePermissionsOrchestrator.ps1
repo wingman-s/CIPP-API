@@ -28,6 +28,15 @@ function Start-UpdatePermissionsOrchestrator {
         if ($Tenants.customerId -notcontains $env:TenantID) {
             $Tenants.Add($PartnerTenant)
         }
+        foreach ($Partner in @(Get-CIPPPartnerTenant | Where-Object { $_.IsPrimary -ne $true })) {
+            if ($Tenants.customerId -notcontains $Partner.RowKey) {
+                $Tenants.Add(@{
+                        'customerId'        = $Partner.RowKey
+                        'defaultDomainName' = 'PartnerTenant'
+                        'displayName'       = "*Partner Tenant ($($Partner.displayName))"
+                    })
+            }
+        }
 
         $CPVTable = Get-CIPPTable -TableName cpvtenants
         $CPVRows = Get-CIPPAzDataTableEntity @CPVTable
@@ -61,10 +70,16 @@ function Start-UpdatePermissionsOrchestrator {
             $TenantBatch = $Tenants | Select-Object defaultDomainName, customerId, displayName, @{n = 'FunctionName'; exp = { 'UpdatePermissionsQueue' } }, @{n = 'QueueId'; exp = { $Queue.RowKey } }
             $InputObject = [PSCustomObject]@{
                 OrchestratorName = 'UpdatePermissionsOrchestrator'
+                AllowCollision   = $false
                 Batch            = @($TenantBatch)
             }
             $InstanceId = Start-CIPPOrchestrator -InputObject $InputObject
-            Write-LogMessage -API 'CPVRefresh' -tenant 'Global' -message "Started CPV permissions refresh for $TenantCount tenant(s). QueueId=$($Queue.RowKey)" -Sev 'Info'
+            $Message = if ("$InstanceId" -like '*-Skipped') {
+                "Skipped CPV permissions refresh for $TenantCount tenant(s): a refresh is still running"
+            } else {
+                "Started CPV permissions refresh for $TenantCount tenant(s). QueueId=$($Queue.RowKey)"
+            }
+            Write-LogMessage -API 'CPVRefresh' -tenant 'Global' -message $Message -Sev 'Info'
             return $InstanceId
         } else {
             Write-Information 'No tenants require permissions update'

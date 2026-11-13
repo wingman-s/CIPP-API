@@ -19,13 +19,24 @@ function Invoke-ExecSetUserPhoto {
 
     try {
         if ([string]::IsNullOrWhiteSpace($userId)) {
+            $FailCode = [HttpStatusCode]::BadRequest
             throw 'User ID is required'
         }
+        if ([string]::IsNullOrWhiteSpace($tenantFilter)) {
+            $FailCode = [HttpStatusCode]::BadRequest
+            throw 'Tenant is required'
+        }
+        if ($userId -match '^\.+$') {
+            $FailCode = [HttpStatusCode]::BadRequest
+            throw 'User ID is invalid'
+        }
+        # The id is one path segment of the Graph URL and must stay one.
+        $UserSegment = [uri]::EscapeDataString($userId)
 
         if ($action -eq 'remove') {
             # Remove the user's profile picture
             try {
-                $null = New-GraphPostRequest -uri "https://graph.microsoft.com/v1.0/users/$userId/photo/`$value" -tenantid $tenantFilter -type DELETE -NoAuthCheck $true
+                $null = New-GraphPostRequest -uri "https://graph.microsoft.com/v1.0/users/$UserSegment/photo/`$value" -tenantid $tenantFilter -type DELETE
                 $Results.Add('Successfully removed user profile picture.')
                 Write-LogMessage -API $APIName -tenant $tenantFilter -headers $Headers -message "Removed profile picture for user $userId" -Sev Info
             } catch {
@@ -40,6 +51,7 @@ function Invoke-ExecSetUserPhoto {
         } elseif ($action -eq 'set') {
             # Set the user's profile picture
             if ([string]::IsNullOrWhiteSpace($photoData)) {
+                $FailCode = [HttpStatusCode]::BadRequest
                 throw 'Photo data is required when setting a profile picture'
             }
 
@@ -54,21 +66,24 @@ function Invoke-ExecSetUserPhoto {
             try {
                 $photoBytes = [Convert]::FromBase64String($base64Data)
             } catch {
+                $FailCode = [HttpStatusCode]::BadRequest
                 throw "Invalid base64 photo data: $($_.Exception.Message)"
             }
 
             # Validate image size (Microsoft Graph has a 4MB limit)
             $maxSizeBytes = 4 * 1024 * 1024 # 4MB
             if ($photoBytes.Length -gt $maxSizeBytes) {
+                $FailCode = [HttpStatusCode]::BadRequest
                 throw "Photo size exceeds 4MB limit. Current size: $([math]::Round($photoBytes.Length / 1MB, 2))MB"
             }
 
             # Upload the photo using Graph API
-            $null = New-GraphPostRequest -uri "https://graph.microsoft.com/v1.0/users/$userId/photo/`$value" -tenantid $tenantFilter -type PUT -body $photoBytes -ContentType 'image/jpeg'
+            $null = New-GraphPostRequest -uri "https://graph.microsoft.com/v1.0/users/$UserSegment/photo/`$value" -tenantid $tenantFilter -type PUT -body $photoBytes -ContentType 'image/jpeg'
 
             $Results.Add('Successfully set user profile picture.')
             Write-LogMessage -API $APIName -tenant $tenantFilter -headers $Headers -message "Set profile picture for user $userId" -Sev Info
         } else {
+            $FailCode = [HttpStatusCode]::BadRequest
             throw "Invalid action. Must be 'set' or 'remove'"
         }
 
@@ -82,7 +97,7 @@ function Invoke-ExecSetUserPhoto {
         $ErrorMessage = Get-CippException -Exception $_
         Write-LogMessage -API $APIName -tenant $tenantFilter -headers $Headers -message "Failed to $action user profile picture. Error: $($ErrorMessage.NormalizedError)" -Sev Error -LogData $ErrorMessage
         return ([HttpResponseContext]@{
-                StatusCode = [HttpStatusCode]::BadRequest
+                StatusCode = $FailCode ?? [HttpStatusCode]::InternalServerError
                 Body       = @{
                     'Results' = @("Failed to $action user profile picture: $($ErrorMessage.NormalizedError)")
                 }

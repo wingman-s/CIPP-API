@@ -8,10 +8,9 @@ function New-CIPPMcpResourceApp {
         https://<host>/api/ExecMcp), exposes the user_impersonation scope, and is what EasyAuth
         validates incoming tokens against. It is deliberately NOT an OAuth client: it has no redirect
         URIs, no secret and no public-client flow. The apps that AI connectors sign in AS are the
-        MCPAllowed API clients (separate app registrations, each with its own role, IP range,
-        redirect URIs and Conditional Access) - keeping client and resource separate is what stops
-        the non-interactive refresh being "a token for itself" (AADSTS90009) and lets an MSP apply
-        device-compliance CA to the client apps without affecting the resource.
+        MCPAllowed API clients (separate app registrations, each with its own redirect URIs) -
+        keeping client and resource separate is what stops the non-interactive refresh being "a
+        token for itself" (AADSTS90009).
 
         Idempotent and self-healing. It resolves the resource app in this order: the appId stored in
         the CippMcpResource table; an existing CIPP-MCP app that already owns this instance's host
@@ -173,7 +172,8 @@ function New-CIPPMcpResourceApp {
                 } catch {
                     $ErrMsg = $_.Exception.Message
                     $InUse = $ErrMsg -match 'identifierUri' -or $ErrMsg -match 'already exists' -or $ErrMsg -match 'in use'
-                    if ($InUse -and $Attempt -lt 5) { Start-Sleep -Seconds 3; continue }
+                    $NotReplicated = $ErrMsg -match 'does not exist or one of its queried reference-property objects are not present'
+                    if (($InUse -or $NotReplicated) -and $Attempt -lt 5) { Start-Sleep -Seconds 3; continue }
                     if ($InUse) {
                         throw "The MCP resource host URIs (https://$Hostname ...) are still assigned to another app registration. If a non-CIPP app holds them, remove it in Entra, then run Save to Azure again. ($ErrMsg)"
                     }

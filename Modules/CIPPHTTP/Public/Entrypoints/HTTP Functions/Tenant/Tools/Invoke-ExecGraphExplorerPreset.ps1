@@ -87,7 +87,7 @@ function Invoke-ExecGraphExplorerPreset {
             Add-CIPPAzDataTableEntity @Table -Entity $Preset -Force
             $Success = $true
         } else {
-            $Entity = Get-CIPPAzDataTableEntity @Table -Filter "RowKey eq '$Id'"
+            $Entity = Get-CIPPAzDataTableEntity @Table -Filter "RowKey eq '$(ConvertTo-CIPPODataFilterValue -Value $Id)'"
             if ($Entity.Owner -eq $Username ) {
                 if ($Action -eq 'Delete') {
                     Remove-CIPPAzDataTableEntity -Force @Table -Entity $Entity
@@ -106,7 +106,7 @@ function Invoke-ExecGraphExplorerPreset {
     } catch {
         $Success = $false
         $Message = $_.Exception.Message
-        $StatusCode = [HttpStatusCode]::BadRequest
+        $StatusCode = [HttpStatusCode]::InternalServerError
     }
 
     if ($Action -in @('Save', 'Delete', 'Copy')) {

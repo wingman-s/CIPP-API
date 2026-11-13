@@ -95,7 +95,7 @@ function Invoke-CIPPRestMethod {
     # ------------------------------------------------------------------
     $HasCippRestClient = $null -ne ('CIPP.CIPPRestClient' -as [type])
     $IsBinaryBody = $Body -is [byte[]]
-    if ($UseLegacyInvokeRestMethod -or $env:DisableCIPPRestMethod -eq 'true' -or -not $HasCippRestClient -or $IsBinaryBody) {
+    if ($UseLegacyInvokeRestMethod -or [System.Environment]::GetEnvironmentVariable('DisableCIPPRestMethod') -eq 'true' -or -not $HasCippRestClient -or $IsBinaryBody) {
         $LegacyParams = @{
             Uri         = $Uri
             Method      = $Method
@@ -165,6 +165,8 @@ function Invoke-CIPPRestMethod {
     # Always skip error check in C# so we get the full HttpResult back
     # (including error response bodies). PS handles error throwing below.
     # ------------------------------------------------------------------
+    # PipelineStopToken is PS 7.6+; on 7.4 Craft sets the global before it stops the pipeline.
+    $StopToken = $PSCmdlet.PipelineStopToken ?? $global:CraftPipelineStopToken
     try {
         $Result = [CIPP.CIPPRestClient]::Send(
             [string]$Uri,
@@ -174,14 +176,15 @@ function Invoke-CIPPRestMethod {
             $(if ($ContentType) { $ContentType } else { $null }),
             $true,
             $TimeoutSec,
-            $MaximumRedirection
+            $MaximumRedirection,
+            $StopToken
         )
     } catch {
         # PowerShell wraps .NET static method exceptions in MethodInvocationException.
         # The actual HttpRequestException / OperationCanceledException is the InnerException.
         $InnerEx = $_.Exception.InnerException ?? $_.Exception
 
-        if ($InnerEx -is [System.OperationCanceledException]) {
+        if ($InnerEx -is [System.OperationCanceledException] -and -not $StopToken.IsCancellationRequested) {
             $PSCmdlet.ThrowTerminatingError(
                 [System.Management.Automation.ErrorRecord]::new(
                     [System.TimeoutException]::new("The request to '$Uri' timed out after ${TimeoutSec}s.", $InnerEx),
@@ -256,13 +259,13 @@ function Invoke-CIPPRestMethod {
     # Return — deserialize JSON or return raw string
     # Empty body → null (matches Invoke-RestMethod on 204 No Content etc.)
     # ------------------------------------------------------------------
-    if ([string]::IsNullOrWhiteSpace($Result.Content)) {
+    if (-not $Result.HasContent) {
         return $null
     }
 
     if ($Result.IsJson) {
         try {
-            return $Result.Content | ConvertFrom-Json -Depth 100
+            return [CIPP.CippJson]::ConvertFromResponse($Result)
         } catch {
             # Malformed JSON — return raw so callers can handle it
             return $Result.Content

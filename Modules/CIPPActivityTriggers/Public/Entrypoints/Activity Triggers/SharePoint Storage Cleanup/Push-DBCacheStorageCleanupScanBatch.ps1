@@ -18,8 +18,8 @@ function Push-DBCacheStorageCleanupScanBatch {
         - Library  one per visible document/page library when collection succeeded
 
         collectionStatus:
-        - Full     libraries were collected; recycle fields may still be null if recycle failed
-        - Skipped  site-level collection failed; no Library rows
+        - Full     every library and the recycle bin were read
+        - Skipped  any read failed; no Library rows (the store restores the site's prior rows)
 
     .FUNCTIONALITY
         Entrypoint
@@ -76,15 +76,11 @@ function Push-DBCacheStorageCleanupScanBatch {
         $SecondBytes = [int64]0
         $Seen = 0
         $Capped = $false
-        $NextUri = "$BaseUri/site/RecycleBin?`$select=Id,Size,ItemState&`$top=500&`$orderby=DeletedDate desc"
-
-        while ($NextUri) {
-            $Page = New-GraphGetRequest -uri $NextUri -tenantid $TenantFilter -scope $Scope -extraHeaders $JsonAccept -UseCertificate -AsApp $true -noPagination $true -SkipValueExtraction
+        while ($true) {
+            $Page = New-GraphGetRequest -uri "$BaseUri/site/RecycleBin?`$select=Id,Size,ItemState&`$top=500&`$skip=$Seen&`$orderby=DeletedDate desc" -tenantid $TenantFilter -scope $Scope -extraHeaders $JsonAccept -UseCertificate -AsApp $true -noPagination $true -SkipValueExtraction
             $Items = @()
-            $NextLink = $null
             if ($null -ne $Page.value) {
                 $Items = @($Page.value)
-                $NextLink = $Page.'@odata.nextLink'
             } elseif ($Page -is [System.Array]) {
                 $Items = @($Page)
             } elseif ($Page.PSObject.Properties.Name -contains 'Id') {
@@ -110,8 +106,7 @@ function Push-DBCacheStorageCleanupScanBatch {
                 }
             }
 
-            if ($Capped -or [string]::IsNullOrWhiteSpace($NextLink)) { break }
-            $NextUri = $NextLink
+            if ($Capped -or $Items.Count -lt 500) { break }
         }
 
         return [PSCustomObject]@{
@@ -161,29 +156,27 @@ function Push-DBCacheStorageCleanupScanBatch {
                 $Libraries = @($Lists | Where-Object { $_.list.hidden -ne $true -and $_.list.template -in @('documentLibrary', 'webPageLibrary') })
 
                 foreach ($List in $Libraries) {
-                    $StorageUsed = $null
-                    $FileCount = $null
-                    $FileStreamSize = $null
-                    $MetadataSize = $null
+                    # A failed read fails the site, so the store keeps its prior values instead of blanks.
+                    $ListInfo = New-GraphGetRequest -uri "$BaseUri/web/lists(guid'$($List.id)')?`$select=EnableVersioning,MajorVersionLimit,VersionPolicies,RootFolder/StorageMetrics&`$expand=RootFolder/StorageMetrics,VersionPolicies" -tenantid $TenantFilter -scope $SpoScope -extraHeaders $JsonAccept -UseCertificate -AsApp $true
+                    $Metrics = $ListInfo.RootFolder
+                    $TotalSize = ConvertTo-SPOAdminListInt64 -Raw $Metrics.StorageMetrics.TotalSize
+                    $FileStreamSize = ConvertTo-SPOAdminListInt64 -Raw $Metrics.StorageMetrics.TotalFileStreamSize
+                    $MetadataSize = ConvertTo-SPOAdminListInt64 -Raw $Metrics.StorageMetrics.MetadataSize
+                    $FileCount = ConvertTo-SPOAdminListInt64 -Raw $Metrics.StorageMetrics.TotalFileCount
+                    # VersionPolicyTrimMode: 0 NoExpiration, 1 ExpireAfter, 2 AutoExpiration.
+                    $TrimMode = $ListInfo.VersionPolicies.DefaultTrimMode -as [int]
+                    $VersionPolicy = if ($ListInfo.EnableVersioning -ne $true) { 'Versioning off' }
+                    elseif ($TrimMode -eq 2) { 'Automatic' }
+                    elseif ($TrimMode -eq 1) { "$($ListInfo.MajorVersionLimit) versions, expire after $($ListInfo.VersionPolicies.DefaultExpireAfterDays) days" }
+                    else { "$($ListInfo.MajorVersionLimit) versions, never expire" }
+                    $StorageUsed = $TotalSize
                     $VersionEstimate = $null
-                    try {
-                        $Metrics = New-GraphGetRequest -uri "$BaseUri/web/lists(guid'$($List.id)')/RootFolder?`$select=StorageMetrics&`$expand=StorageMetrics" -tenantid $TenantFilter -scope $SpoScope -extraHeaders $JsonAccept -UseCertificate -AsApp $true
-                        $TotalSize = ConvertTo-SPOAdminListInt64 -Raw $Metrics.StorageMetrics.TotalSize
-                        $FileStreamSize = ConvertTo-SPOAdminListInt64 -Raw $Metrics.StorageMetrics.TotalFileStreamSize
-                        $MetadataSize = ConvertTo-SPOAdminListInt64 -Raw $Metrics.StorageMetrics.MetadataSize
-                        $FileCount = ConvertTo-SPOAdminListInt64 -Raw $Metrics.StorageMetrics.TotalFileCount
-                        $StorageUsed = $TotalSize
-                        if ($null -ne $TotalSize) {
-                            $Tip = if ($null -ne $FileStreamSize) { $FileStreamSize } else { [int64]0 }
-                            $Meta = if ($null -ne $MetadataSize) { $MetadataSize } else { [int64]0 }
-                            $VersionEstimate = [Math]::Max([int64]0, $TotalSize - $Tip - $Meta)
-                        }
-                    } catch {
-                        $StorageUsed = $null
-                        $FileCount = $null
-                        $FileStreamSize = $null
-                        $MetadataSize = $null
-                        $VersionEstimate = $null
+                    if ($null -ne $TotalSize) {
+                        $Tip = if ($null -ne $FileStreamSize) { $FileStreamSize } else { [int64]0 }
+                        $Meta = if ($null -ne $MetadataSize) { $MetadataSize } else { [int64]0 }
+                        # TotalSize also counts ~40 KB per library and ~320 bytes of metadata per file (measured on 538 libraries), which is not version history.
+                        $Overhead = 40KB + 320 * [int64]($FileCount ?? 0)
+                        $VersionEstimate = [Math]::Max([int64]0, $TotalSize - $Tip - $Meta - $Overhead)
                     }
 
                     $LibraryRows.Add([PSCustomObject]@{
@@ -199,19 +192,16 @@ function Push-DBCacheStorageCleanupScanBatch {
                             fileStreamSizeInBytes = $FileStreamSize
                             metadataSizeInBytes   = $MetadataSize
                             fileCount             = $FileCount
+                            versionPolicy         = $VersionPolicy
+                            versionTrimMode       = $TrimMode
+                            majorVersionLimit     = $ListInfo.MajorVersionLimit
                             template              = $List.list.template
                             webUrl                = $List.webUrl
                             collectedAt           = $CollectedAt
                         })
                 }
 
-                $Recycle = $null
-                try {
-                    $Recycle = Get-CIPPRecycleBinSummary -TenantFilter $TenantFilter -SiteUrl $SiteUrl -Scope $SpoScope -JsonAccept $JsonAccept
-                } catch {
-                    Write-LogMessage -API 'CIPPDBCache' -tenant $TenantFilter -message "StorageCleanupScan: recycle summary failed for '$SiteUrl': $($_.Exception.Message)" -sev Warning
-                    $Recycle = $null
-                }
+                $Recycle = Get-CIPPRecycleBinSummary -TenantFilter $TenantFilter -SiteUrl $SiteUrl -Scope $SpoScope -JsonAccept $JsonAccept
 
                 $SiteResults.Add([PSCustomObject]@{
                         SiteId           = $SiteId

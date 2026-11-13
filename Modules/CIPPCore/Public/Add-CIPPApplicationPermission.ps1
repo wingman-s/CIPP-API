@@ -6,7 +6,8 @@ function Add-CIPPApplicationPermission {
         $ApplicationId,
         $TenantFilter
     )
-    if ($ApplicationId -eq $env:ApplicationID -and $TenantFilter -eq $env:TenantID) {
+    $IsPartnerTenant = $TenantFilter -eq 'PartnerTenant' -or $TenantFilter -eq $env:TenantID -or [bool](Get-CIPPPartnerTenant -PartnerTenantId $TenantFilter)
+    if ($ApplicationId -eq $env:ApplicationID -and $IsPartnerTenant) {
         $RequiredResourceAccess = 'CIPPDefaults'
     }
     if ($RequiredResourceAccess -eq 'CIPPDefaults') {
@@ -58,14 +59,19 @@ function Add-CIPPApplicationPermission {
     $ServicePrincipalList = [System.Collections.Generic.List[object]]::new()
     $SPList = New-GraphGETRequest -uri "https://graph.microsoft.com/beta/servicePrincipals?`$select=AppId,id,displayName&`$top=999" -skipTokenCache $true -tenantid $TenantFilter -NoAuthCheck $true
     foreach ($SP in $SPList) { $ServicePrincipalList.Add($SP) }
-    $ourSVCPrincipal = $ServicePrincipalList | Where-Object -Property AppId -EQ $ApplicationId
+    $ourSVCPrincipal = $ServicePrincipalList | Where-Object -Property AppId -EQ $ApplicationId | Select-Object -First 1
+    foreach ($Delay in 0, 2, 4, 8, 16) {
+        if ($ourSVCPrincipal) { break }
+        # A service principal created moments ago can take a while to replicate.
+        Start-Sleep -Seconds $Delay
+        try {
+            $ourSVCPrincipal = New-GraphGETRequest -uri "https://graph.microsoft.com/beta/servicePrincipals(appId='$ApplicationId')?`$select=appId,id,displayName" -tenantid $TenantFilter -skipTokenCache $true -NoAuthCheck $true
+        } catch {
+            Write-Information "Service principal for $ApplicationId not found in $TenantFilter yet: $($_.Exception.Message)"
+        }
+    }
     if (!$ourSVCPrincipal) {
-        #Our Service Principal isn't available yet. We do a sleep and reexecute after 3 seconds.
-        Start-Sleep -Seconds 5
-        $ServicePrincipalList.Clear()
-        $SPList = New-GraphGETRequest -uri "https://graph.microsoft.com/beta/servicePrincipals?`$select=AppId,id,displayName&`$top=999" -skipTokenCache $true -tenantid $TenantFilter -NoAuthCheck $true
-        foreach ($SP in $SPList) { $ServicePrincipalList.Add($SP) }
-        $ourSVCPrincipal = $ServicePrincipalList | Where-Object -Property AppId -EQ $ApplicationId
+        throw "Service principal for application $ApplicationId was not found in tenant $TenantFilter"
     }
 
     $Results = [System.Collections.Generic.List[string]]::new()

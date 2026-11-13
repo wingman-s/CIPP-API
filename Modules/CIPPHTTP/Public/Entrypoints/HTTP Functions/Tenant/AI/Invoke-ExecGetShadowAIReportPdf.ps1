@@ -14,14 +14,14 @@ function Invoke-ExecGetShadowAIReportPdf {
     param($Request, $TriggerMetadata)
 
     $APIName = $TriggerMetadata.FunctionName
-    Write-LogMessage -Headers $Request.Headers -API $APIName -message 'Accessed this API' -Sev 'Debug'
 
     try {
         $TenantFilter = $Request.Query.tenantFilter ?? $Request.Body.tenantFilter
         if ([string]::IsNullOrWhiteSpace($TenantFilter)) {
             return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = 'A tenantFilter is required' })
         }
-        $TenantName = Get-CippReportTenantName -TenantFilter $TenantFilter
+        $BrandingPresetId = [string]($Request.Body.brandingPresetId ?? $Request.Query.brandingPresetId)
+        $TenantName = Get-CippReportTenantName -TenantFilter $TenantFilter -BrandingPresetId $BrandingPresetId
 
         # Optional per-section toggles from the client's section panel (POST body). Absent -> full report.
         $SectionConfig = @{}
@@ -40,7 +40,7 @@ function Invoke-ExecGetShadowAIReportPdf {
             byRisk        = $Raw.byRisk
         }
 
-        $Bytes = ConvertTo-CippReportPdf -Blocks $Report.Blocks -Variables $Report.Variables -TenantName $TenantName -TenantFilter $TenantFilter -ReportName 'Shadow AI Report'
+        $Bytes = ConvertTo-CippReportPdf -Blocks $Report.Blocks -Variables $Report.Variables -TenantName $TenantName -TenantFilter $TenantFilter -ReportName 'Shadow AI Report' -BrandingPresetId $BrandingPresetId
         $FileName = ("Shadow_AI_Report_$TenantFilter" -replace '[^a-zA-Z0-9_\-]', '_') + '.pdf'
         return ([HttpResponseContext]@{
                 StatusCode  = [HttpStatusCode]::OK

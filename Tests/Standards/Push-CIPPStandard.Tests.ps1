@@ -32,7 +32,7 @@ BeforeAll {
     # binding makes signature drift fail loudly here instead of silently landing in $args.
     function Test-CIPPRerun { [CmdletBinding()] param($Type, $Tenant, $API, $BaseTime, $Settings) }
     function Set-CippStandardInfoContext { [CmdletBinding()] param($StandardInfo) }
-    function Set-CippUserAgentContext { [CmdletBinding()] param($Source, $TemplateId) }
+    function Set-CippUserAgentContext { [CmdletBinding()] param([string]$Source, [string]$TemplateId) }
     function Write-LogMessage { [CmdletBinding()] param($API, $tenant, $message, $sev, $LogData, $headers) }
     function Get-CippException { [CmdletBinding()] param($Exception) }
     function Get-CIPPTable { [CmdletBinding()] param($tablename) }
@@ -42,29 +42,21 @@ BeforeAll {
 
     # Stand-ins for the real standards. Each captures what the dispatcher handed it. Three shapes are
     # covered: the two template standards, which compose their rerun key from the selected template,
-    # and an ordinary standard, which does not.
-    function Invoke-CIPPStandardIntuneTemplate {
-        [CmdletBinding()]
-        param($Tenant, $Settings)
+    # and an ordinary standard, which does not. They live in a module named CIPPStandards because the
+    # dispatcher only runs standards from that module.
+    $Record = {
+        param($Standard, $Tenant, $Settings)
         $script:CapturedSettings = $Settings
         $script:CapturedTenant = $Tenant
-        $script:CapturedStandard = 'IntuneTemplate'
-        if ($script:StandardShouldThrow) { throw 'Graph exploded' }
+        $script:CapturedStandard = $Standard
+        if ($Standard -eq 'IntuneTemplate' -and $script:StandardShouldThrow) { throw 'Graph exploded' }
     }
-    function Invoke-CIPPStandardConditionalAccessTemplate {
-        [CmdletBinding()]
-        param($Tenant, $Settings)
-        $script:CapturedSettings = $Settings
-        $script:CapturedTenant = $Tenant
-        $script:CapturedStandard = 'ConditionalAccessTemplate'
-    }
-    function Invoke-CIPPStandardAntiPhishPolicy {
-        [CmdletBinding()]
-        param($Tenant, $Settings)
-        $script:CapturedSettings = $Settings
-        $script:CapturedTenant = $Tenant
-        $script:CapturedStandard = 'AntiPhishPolicy'
-    }
+    New-Module -Name CIPPStandards -ArgumentList $Record -ScriptBlock {
+        param($Record)
+        function Invoke-CIPPStandardIntuneTemplate { [CmdletBinding()] param($Tenant, $Settings) & $Record 'IntuneTemplate' $Tenant $Settings }
+        function Invoke-CIPPStandardConditionalAccessTemplate { [CmdletBinding()] param($Tenant, $Settings) & $Record 'ConditionalAccessTemplate' $Tenant $Settings }
+        function Invoke-CIPPStandardAntiPhishPolicy { [CmdletBinding()] param($Tenant, $Settings) & $Record 'AntiPhishPolicy' $Tenant $Settings }
+    } | Import-Module -Force
 
     . (Resolve-CippFunctionFile -Name 'Get-CIPPTextReplacement.ps1')
     . (Resolve-CippFunctionFile -Name 'Remove-CIPPStandardSettingsRawData.ps1')
@@ -145,7 +137,7 @@ Describe 'Push-CIPPStandard settings handling' {
             # Called twice: once with the context, once with $null to clear it in the finally block.
             if ($null -ne $StandardInfo) { $script:CapturedStandardInfo = $StandardInfo }
         }
-        Mock -CommandName Set-CippUserAgentContext -MockWith { }
+        Mock -CommandName Set-CippUserAgentContext -MockWith { $script:CapturedUserAgentTemplateId = $TemplateId }
         Mock -CommandName Get-CippException -MockWith { @{} }
         Mock -CommandName Get-CIPPTable -MockWith { @{} }
         Mock -CommandName Get-CIPPSchemaExtensions -MockWith { @() }
@@ -167,11 +159,6 @@ Describe 'Push-CIPPStandard settings handling' {
             if ($Filter -match "PartitionKey eq 'AllTenants'") { return $script:GlobalRows }
             return @()
         }
-        # The dispatcher gates on the standard existing in the CIPPStandards module, which is not
-        # loaded here. Only that lookup is intercepted.
-        Mock -CommandName Get-Command -MockWith {
-            [pscustomobject]@{ Name = 'Invoke-CIPPStandardIntuneTemplate' }
-        } -ParameterFilter { $Module -contains 'CIPPStandards' }
     }
 
     Context 'the reported failure' {
@@ -400,15 +387,34 @@ Describe 'Push-CIPPStandard settings handling' {
         }
     }
 
+    Context 'merged template tiers' {
+        It 'passes one template id to the user agent when tiers merged several' {
+            $Item = New-QueueItem -Settings ([pscustomobject]@{ remediate = $true }) -Standard 'AntiPhishPolicy'
+            $Item.TemplateId = @('aaaaaaaa-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000002')
+
+            Push-CIPPStandard -Item $Item
+
+            $script:CapturedStandard | Should -Be 'AntiPhishPolicy'
+            $script:CapturedUserAgentTemplateId | Should -Be 'aaaaaaaa-0000-0000-0000-000000000001'
+        }
+    }
+
     Context 'standards that no longer exist' {
         It 'logs a warning and does not invoke anything' {
-            Mock -CommandName Get-Command -MockWith { $null } -ParameterFilter { $Module -contains 'CIPPStandards' }
-
             { Push-CIPPStandard -Item (New-QueueItem -Settings (New-TemplateSettings) -Standard 'RemovedStandard') } |
                 Should -Not -Throw
 
             $script:CapturedSettings | Should -BeNullOrEmpty
             $script:LoggedWarnings -join ' ' | Should -BeLike '*RemovedStandard*deprecated*'
+        }
+
+        It 'does not run a matching function from outside the CIPPStandards module' {
+            function Invoke-CIPPStandardOutsider { [CmdletBinding()] param($Tenant, $Settings) $script:CapturedStandard = 'Outsider' }
+
+            Push-CIPPStandard -Item (New-QueueItem -Settings (New-TemplateSettings) -Standard 'Outsider')
+
+            $script:CapturedStandard | Should -BeNullOrEmpty
+            $script:LoggedWarnings -join ' ' | Should -BeLike '*Outsider*deprecated*'
         }
     }
 

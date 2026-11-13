@@ -7,24 +7,28 @@ function Invoke-AddAssignmentFilterTemplate {
     #>
     [CmdletBinding()]
     param($Request, $TriggerMetadata)
+
+    if (-not (Test-CippTemplateWriteAccess -PartitionKey 'AssignmentFilterTemplate' -RowKey $Request.Body.GUID)) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::Forbidden; Body = @{ Results = 'Roles limited to specific tenants cannot change or remove shared templates.' } })
+    }
     $APIName = $Request.Params.CIPPEndpoint
     $Headers = $Request.Headers
 
 
     $GUID = $Request.Body.GUID ?? (New-Guid).GUID
+    if (!$Request.Body.displayName) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ Results = 'Assignment Filter Template Creation failed: You must enter a displayname' } })
+    }
+
+    if (!$Request.Body.rule) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ Results = 'Assignment Filter Template Creation failed: You must enter a filter rule' } })
+    }
+
+    if (!$Request.Body.platform) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ Results = 'Assignment Filter Template Creation failed: You must select a platform' } })
+    }
+
     try {
-        if (!$Request.Body.displayName) {
-            throw 'You must enter a displayname'
-        }
-
-        if (!$Request.Body.rule) {
-            throw 'You must enter a filter rule'
-        }
-
-        if (!$Request.Body.platform) {
-            throw 'You must select a platform'
-        }
-
         # Normalize field names to handle different casing from various forms
         $displayName = $Request.Body.displayName ?? $Request.Body.Displayname ?? $Request.Body.displayname
         $description = $Request.Body.description ?? $Request.Body.Description
@@ -50,14 +54,16 @@ function Invoke-AddAssignmentFilterTemplate {
         Write-LogMessage -headers $Request.Headers -API $APINAME -tenant 'Global' -message "Created Assignment Filter template named $displayName with GUID $GUID" -Sev 'Info'
 
         $body = [pscustomobject]@{'Results' = 'Successfully added template' }
+        $StatusCode = [HttpStatusCode]::OK
     } catch {
         Write-LogMessage -headers $Request.Headers -API $APINAME -tenant 'Global' -message "Assignment Filter Template Creation failed: $($_.Exception.Message)" -Sev 'Error'
         $body = [pscustomobject]@{'Results' = "Assignment Filter Template Creation failed: $($_.Exception.Message)" }
+        $StatusCode = [HttpStatusCode]::InternalServerError
     }
 
 
     return ([HttpResponseContext]@{
-            StatusCode = [HttpStatusCode]::OK
+            StatusCode = $StatusCode
             Body       = $body
         })
 

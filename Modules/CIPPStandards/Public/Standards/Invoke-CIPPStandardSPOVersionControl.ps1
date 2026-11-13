@@ -17,8 +17,8 @@ function Invoke-CIPPStandardSPOVersionControl {
             Controls how SharePoint Online manages file version history at the tenant level. Automatic trimming lets Microsoft optimize storage by cleaning up old versions intelligently. Manual limits give administrators precise control over the maximum number of versions retained and their expiration, ensuring predictable storage usage and compliance with data retention policies.
         ADDEDCOMPONENT
             {"type":"switch","name":"standards.SPOVersionControl.EnableAutoTrim","label":"Enable Automatic Version Trimming (Microsoft managed)"}
-            {"type":"number","name":"standards.SPOVersionControl.MajorVersionLimit","label":"Maximum Major Versions (when auto trim is off)","default":50}
-            {"type":"number","name":"standards.SPOVersionControl.ExpireVersionsAfterDays","label":"Expire Versions After Days (0 = never, otherwise 30-36500, when auto trim is off)","default":0,"validators":{"min":{"value":0,"message":"Use 0 for never, or 30 or more days"},"max":{"value":36500,"message":"Maximum value is 36500"}}}
+            {"type":"number","name":"standards.SPOVersionControl.MajorVersionLimit","label":"Maximum Major Versions (when auto trim is off)","required":false,"default":50}
+            {"type":"number","name":"standards.SPOVersionControl.ExpireVersionsAfterDays","label":"Expire Versions After Days (0 = never, otherwise 30-36500, when auto trim is off)","required":false,"default":0,"validators":{"min":{"value":0,"message":"Use 0 for never, or 30 or more days"},"max":{"value":36500,"message":"Maximum value is 36500"}}}
             {"type":"switch","name":"standards.SPOVersionControl.ApplyToExistingSites","label":"Apply to all existing sites and document libraries"}
         IMPACT
             Medium Impact
@@ -128,7 +128,7 @@ function Invoke-CIPPStandardSPOVersionControl {
                         @{ Type = 'Int32'; Value = $DesiredExpireVersionsAfterDays }
                     )
                 }
-                $CurrentState | Set-CIPPSPOTenant -MethodName 'SetFileVersionPolicy' -MethodParameters $MethodParams -UseCertificate
+                $null = $CurrentState | Set-CIPPSPOTenant -MethodName 'SetFileVersionPolicy' -MethodParameters $MethodParams -UseCertificate
                 Write-LogMessage -API 'Standards' -tenant $Tenant -message "Successfully configured SharePoint version control ($ExpectedDescription)" -sev Info
 
                 # Apply to all existing sites and their document libraries
@@ -136,13 +136,17 @@ function Invoke-CIPPStandardSPOVersionControl {
                     $Sites = @(New-GraphGetRequest -uri "https://graph.microsoft.com/beta/sites/getAllSites?`$select=webUrl&`$top=999" -tenantid $Tenant -AsApp $true)
                     Write-LogMessage -API 'Standards' -tenant $Tenant -message "Applying version policy to $($Sites.Count) existing sites" -sev Info
 
+                    # SharePoint only queues the existing-library job for an explicit policy; leaving out ApplyToNewDocumentLibraries keeps new libraries inheriting the tenant
                     $SiteProperties = @{
-                        InheritVersionPolicyFromTenant   = $true
+                        InheritVersionPolicyFromTenant   = $false
                         EnableAutoExpirationVersionTrim  = $DesiredAutoTrim
-                        ApplyToNewDocumentLibraries      = $true
                         ApplyToExistingDocumentLibraries = $true
                     }
-                    if (-not $DesiredAutoTrim) {
+                    if ($DesiredAutoTrim) {
+                        $SiteProperties.MajorVersionLimit = -1
+                        $SiteProperties.ExpireVersionsAfterDays = -1
+                        $SiteProperties.MajorWithMinorVersionsLimit = -1
+                    } else {
                         $SiteProperties.MajorVersionLimit = $DesiredMajorVersionLimit
                         $SiteProperties.ExpireVersionsAfterDays = $DesiredExpireVersionsAfterDays
                     }
@@ -154,7 +158,7 @@ function Invoke-CIPPStandardSPOVersionControl {
                     foreach ($FailedSite in $FailedSites) {
                         Write-LogMessage -API 'Standards' -tenant $Tenant -message "Failed to set version policy for site $($FailedSite.SiteUrl): $($FailedSite.Error)" -sev Error
                     }
-                    Write-LogMessage -API 'Standards' -tenant $Tenant -message "Finished applying version policy to $($Sites.Count - $FailedSites.Count) of $($Sites.Count) existing sites" -sev Info
+                    Write-LogMessage -API 'Standards' -tenant $Tenant -message "Queued the version policy for existing document libraries on $($Sites.Count - $FailedSites.Count) of $($Sites.Count) sites. SharePoint applies it in the background, which can take up to 24 hours." -sev Info
                 }
             } catch {
                 $ErrorMessage = Get-CippException -Exception $_

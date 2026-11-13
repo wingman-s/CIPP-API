@@ -156,9 +156,15 @@ function Invoke-CIPPTestCollection {
         }
     }
 
-    # Standard suites: discover functions by name pattern via Get-Command.
+    # Standard suites: match the suite's name pattern against CIPPTests' exports (Get-Command -Module walks PSModulePath).
     $Pattern = $SuitePatterns[$SuiteName]
-    $TestFunctions = @(Get-Command -Name $Pattern -Module CIPPTests -ErrorAction SilentlyContinue)
+    $Exported = ((Get-Module -Name CIPPTests) ?? (Import-Module -Name CIPPTests -PassThru)).ExportedFunctions
+    $SuiteCommands = @{
+        Tests = @(foreach ($Function in $Exported.Values) { if ($Function.Name -like $Pattern) { $Function } })
+        Setup = $Exported["Initialize-CippTestSuite$SuiteName"]
+        Clear = $Exported["Clear-CippTestSuite$SuiteName"]
+    }
+    $TestFunctions = $SuiteCommands.Tests
     if ($TestFunctions.Count -eq 0) {
         Write-Information "No test functions found for suite $SuiteName (pattern: $Pattern) — skipping"
         return @{
@@ -177,6 +183,12 @@ function Invoke-CIPPTestCollection {
 
     $Table = Get-CippTable -tablename 'CippTestResults'
     $ResultBatch = [System.Collections.Generic.List[hashtable]]::new()
+
+    # A suite can share per-tenant work across its tests: Initialize-CippTestSuite<Suite> runs first, Clear-CippTestSuite<Suite> last.
+    $SuiteSetup = $SuiteCommands.Setup
+    if ($SuiteSetup) {
+        try { & $SuiteSetup -Tenant $TenantFilter } catch { Write-Information "  [$SuiteName] Suite setup failed, tests run without it: $($_.Exception.Message)" }
+    }
 
     foreach ($TestFunction in $TestFunctions) {
         $ItemStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -201,6 +213,8 @@ function Invoke-CIPPTestCollection {
             $Timings.Add(('{0} : {1:N3}s (FAILED)' -f $TestFunction.Name, $ItemStopwatch.Elapsed.TotalSeconds))
         }
     }
+
+    if ($SuiteSetup) { & $SuiteCommands.Clear }
 
     # Final flush
     if ($ResultBatch.Count -gt 0) {

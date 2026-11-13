@@ -12,6 +12,11 @@ function Invoke-CippTestZTNA21816 {
     $TestId = 'ZTNA21816'
 
     try {
+        if (-not (Test-CIPPStandardLicense -StandardName $TestId -TenantFilter $Tenant -Preset PIM -SkipLog)) {
+            Add-CippTestResult -TenantFilter $Tenant -TestId $TestId -TestType 'Identity' -Status 'Unlicensed' -ResultMarkdown 'This tenant is not licensed for Privileged Identity Management. Required capabilities: AAD_PREMIUM_P2, Entra_Identity_Governance.' -Risk 'High' -Name 'All Microsoft Entra privileged role assignments are managed with PIM' -UserImpact 'Low' -ImplementationEffort 'Medium' -Category 'Privileged access'
+            return
+        }
+
         $GlobalAdminRoleId = '62e90394-69f5-4237-9190-012177145e10'
         $PermanentGAUserList = [System.Collections.Generic.List[object]]::new()
         $PermanentGAGroupList = [System.Collections.Generic.List[object]]::new()
@@ -22,7 +27,6 @@ function Invoke-CippTestZTNA21816 {
         $RoleEligibilitySchedules = Get-CIPPTestData -TenantFilter $Tenant -Type 'RoleEligibilitySchedules'
         $RoleAssignmentScheduleInstances = Get-CIPPTestData -TenantFilter $Tenant -Type 'RoleAssignmentScheduleInstances'
         $Users = Get-CIPPTestData -TenantFilter $Tenant -Type 'Users'
-        $Groups = Get-CIPPTestData -TenantFilter $Tenant -Type 'Groups'
 
         $EligibleGAs = $RoleEligibilitySchedules.Where({ $_.roleDefinitionId -eq $GlobalAdminRoleId })
         $EligibleGAUsers = 0
@@ -30,15 +34,21 @@ function Invoke-CippTestZTNA21816 {
         # Build id-keyed lookups once to avoid O(N*M) Where-Object scans
         $UsersById = @{}
         foreach ($U in $Users) { $UsersById[$U.id] = $U }
+        $GAMembers = Get-CippDbRoleMembers -TenantFilter $Tenant -RoleTemplateId $GlobalAdminRoleId
+        # Members are streamed: kept for every group they are too large to cache, so only the groups looked up below are kept
+        $LookupGroupIds = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($Id in @($EligibleGAs.principalId) + @($GAMembers.id)) { if ($Id) { [void]$LookupGroupIds.Add([string]$Id) } }
         $GroupsById = @{}
-        foreach ($G in $Groups) { $GroupsById[$G.id] = $G }
-        # Composite-key lookup: principalId|roleDefinitionId
-        $AssignmentByPrincipalRole = @{}
+        Get-CIPPTestData -TenantFilter $Tenant -Type 'Groups' -Fields 'id', 'members' -Stream | ForEach-Object {
+            if ($LookupGroupIds.Contains([string]$_.id)) { $GroupsById[$_.id] = $_ }
+        }
+        # Composite keys principalId|roleDefinitionId: any PIM assignment, and standing ones (Assigned, no end date)
+        $AssignedKeys = [System.Collections.Generic.HashSet[string]]::new()
+        $PermanentKeys = [System.Collections.Generic.HashSet[string]]::new()
         foreach ($A in $RoleAssignmentScheduleInstances) {
-            $key = '{0}|{1}' -f $A.principalId, $A.roleDefinitionId
-            if (-not $AssignmentByPrincipalRole.ContainsKey($key)) {
-                $AssignmentByPrincipalRole[$key] = $A
-            }
+            $Key = '{0}|{1}' -f $A.principalId, $A.roleDefinitionId
+            [void]$AssignedKeys.Add($Key)
+            if ($A.assignmentType -eq 'Assigned' -and $null -eq $A.endDateTime) { [void]$PermanentKeys.Add($Key) }
         }
 
         foreach ($EligibleGA in $EligibleGAs) {
@@ -48,7 +58,7 @@ function Invoke-CippTestZTNA21816 {
             } else {
                 $GroupPrincipal = $GroupsById[$EligibleGA.principalId]
                 if ($GroupPrincipal -and $GroupPrincipal.members) {
-                    $MemberSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$GroupPrincipal.members)
+                    $MemberSet = [System.Collections.Generic.HashSet[string]]::new([string[]]@($GroupPrincipal.members.id))
                     foreach ($U in $Users) { if ($MemberSet.Contains($U.id)) { $EligibleGAUsers++ } }
                 }
             }
@@ -62,40 +72,41 @@ function Invoke-CippTestZTNA21816 {
             $RoleMembers = Get-CippDbRoleMembers -TenantFilter $Tenant -RoleTemplateId $Role.RoletemplateId
 
             foreach ($Member in $RoleMembers) {
-                $Assignment = $AssignmentByPrincipalRole['{0}|{1}' -f $Member.id, $Role.RoletemplateId]
+                if ($Member.AssignmentType -eq 'Eligible') { continue }
+                $Key = '{0}|{1}' -f $Member.id, $Role.RoletemplateId
 
-                if (-not $Assignment -or ($Assignment.assignmentType -eq 'Assigned' -and $null -eq $Assignment.endDateTime)) {
+                if (-not $AssignedKeys.Contains($Key) -or $PermanentKeys.Contains($Key)) {
                     $MemberInfo = [PSCustomObject]@{
                         displayName       = $Member.displayName
                         userPrincipalName = $Member.userPrincipalName
                         id                = $Member.id
                         roleTemplateId    = $Role.RoletemplateId
                         roleName          = $Role.displayName
-                        assignmentType    = if ($Assignment) { $Assignment.assignmentType } else { 'Not in PIM' }
+                        assignmentType    = if ($PermanentKeys.Contains($Key)) { 'Assigned' } else { 'Not in PIM' }
                     }
 
+                    # Service principals are covered by ZTNA21836
                     if ($Member.'@odata.type' -eq '#microsoft.graph.user') {
                         $NonPIMPrivilegedUsers.Add($MemberInfo)
-                    } else {
+                    } elseif ($Member.'@odata.type' -eq '#microsoft.graph.group') {
                         $NonPIMPrivilegedGroups.Add($MemberInfo)
                     }
                 }
             }
         }
 
-        $GAMembers = Get-CippDbRoleMembers -TenantFilter $Tenant -RoleTemplateId $GlobalAdminRoleId
-
         foreach ($Member in $GAMembers) {
-            $Assignment = $AssignmentByPrincipalRole['{0}|{1}' -f $Member.id, $GlobalAdminRoleId]
+            if ($Member.AssignmentType -eq 'Eligible') { continue }
+            $Key = '{0}|{1}' -f $Member.id, $GlobalAdminRoleId
 
-            if (-not $Assignment -or ($Assignment.assignmentType -eq 'Assigned' -and $null -eq $Assignment.endDateTime)) {
+            if (-not $AssignedKeys.Contains($Key) -or $PermanentKeys.Contains($Key)) {
                 $MemberInfo = [PSCustomObject]@{
                     displayName           = $Member.displayName
                     userPrincipalName     = $Member.userPrincipalName
                     id                    = $Member.id
                     roleTemplateId        = $GlobalAdminRoleId
                     roleName              = 'Global Administrator'
-                    assignmentType        = if ($Assignment) { $Assignment.assignmentType } else { 'Not in PIM' }
+                    assignmentType        = if ($PermanentKeys.Contains($Key)) { 'Assigned' } else { 'Not in PIM' }
                     onPremisesSyncEnabled = $null
                 }
 
@@ -110,7 +121,7 @@ function Invoke-CippTestZTNA21816 {
 
                     $Group = $GroupsById[$Member.id]
                     if ($Group -and $Group.members) {
-                        $MemberSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$Group.members)
+                        $MemberSet = [System.Collections.Generic.HashSet[string]]::new([string[]]@($Group.members.id))
                         foreach ($GroupMember in $Users) {
                             if (-not $MemberSet.Contains($GroupMember.id)) { continue }
                             $GroupMemberInfo = [PSCustomObject]@{
@@ -143,10 +154,10 @@ function Invoke-CippTestZTNA21816 {
         } elseif ($PermanentGACount -gt 2) {
             $Passed = $false
             $CustomStatus = 'Investigate'
-            $ResultMarkdown = [System.Text.StringBuilder]::new('Three or more accounts are permanently assigned the Global Administrator role. Review to determine whether these are emergency access accounts.')
+            $ResultMarkdown = [System.Text.StringBuilder]::new('Three or more accounts are permanently assigned the Global Administrator role. Review to determine whether these are emergency access accounts configured in accordance with Microsoft guidance.')
         } else {
             $Passed = $true
-            $ResultMarkdown = [System.Text.StringBuilder]::new('All Microsoft Entra privileged role assignments are managed with PIM with the exception of up to two standing Global Administrator accounts.')
+            $ResultMarkdown = [System.Text.StringBuilder]::new('All Microsoft Entra privileged role assignments are managed with PIM with the exception of up to two standing Global Administrator accounts that are permitted by this check for emergency access.')
         }
 
         $null = $ResultMarkdown.Append("`n`n## Assessment summary`n`n")
@@ -186,12 +197,12 @@ function Invoke-CippTestZTNA21816 {
             }
         }
 
-        $Status = if ($Passed) { 'Passed' } else { 'Failed' }
-        Add-CippTestResult -TenantFilter $Tenant -TestId $TestId -TestType 'Identity' -Status $Status -ResultMarkdown $ResultMarkdown -Risk 'High' -Name 'All Microsoft Entra privileged role assignments are managed with PIM' -UserImpact 'Low' -ImplementationEffort 'Medium' -Category 'Identity'
+        $Status = if ($CustomStatus) { $CustomStatus } elseif ($Passed) { 'Passed' } else { 'Failed' }
+        Add-CippTestResult -TenantFilter $Tenant -TestId $TestId -TestType 'Identity' -Status $Status -ResultMarkdown $ResultMarkdown -Risk 'High' -Name 'All Microsoft Entra privileged role assignments are managed with PIM' -UserImpact 'Low' -ImplementationEffort 'Medium' -Category 'Privileged access'
 
     } catch {
         $ErrorMessage = Get-CippException -Exception $_
         Write-LogMessage -API 'Tests' -tenant $Tenant -message "Failed to run test: $($ErrorMessage.NormalizedError)" -sev Error -LogData $ErrorMessage
-        Add-CippTestResult -TenantFilter $Tenant -TestId $TestId -TestType 'Identity' -Status 'Failed' -ResultMarkdown "Error running test: $($ErrorMessage.NormalizedError)" -Risk 'High' -Name 'All Microsoft Entra privileged role assignments are managed with PIM' -UserImpact 'Low' -ImplementationEffort 'Medium' -Category 'Identity'
+        Add-CippTestResult -TenantFilter $Tenant -TestId $TestId -TestType 'Identity' -Status 'Failed' -ResultMarkdown "Error running test: $($ErrorMessage.NormalizedError)" -Risk 'High' -Name 'All Microsoft Entra privileged role assignments are managed with PIM' -UserImpact 'Low' -ImplementationEffort 'Medium' -Category 'Privileged access'
     }
 }

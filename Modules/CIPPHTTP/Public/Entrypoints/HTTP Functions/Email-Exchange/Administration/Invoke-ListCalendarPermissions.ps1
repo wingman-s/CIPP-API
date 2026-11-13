@@ -1,7 +1,7 @@
 function Invoke-ListCalendarPermissions {
     <#
     .FUNCTIONALITY
-        Entrypoint
+        Entrypoint,TenantGroup
     .ROLE
         Exchange.Mailbox.Read
     .DESCRIPTION
@@ -16,6 +16,9 @@ function Invoke-ListCalendarPermissions {
     # Serve from the reporting database cache instead of live Graph. Much faster, especially for AllTenants.
     $UseReportDB = $Request.Query.UseReportDB -eq $true
     $ByUser = $Request.Query.ByUser
+    if (-not $UserID -and -not $UseReportDB) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ Results = 'UserID is required unless UseReportDB is set' } })
+    }
 
     try {
         # If UseReportDB is specified and no specific UserID, retrieve from report database
@@ -29,6 +32,16 @@ function Invoke-ListCalendarPermissions {
                 $ReportParams.ByUser = $true
             }
             try {
+                # Return one page per request as { Results, Metadata } with a continuation token in Metadata.nextLink.
+                if ($Request.Query.manualPagination -eq $true) {
+                    # Cached rows per page, clamped between 250 and 10000. Defaults to 5000. Pages hold whole tenants.
+                    $PageSize = $Request.Query.PageSize -as [int]
+                    return ([HttpResponseContext]@{
+                            StatusCode = [HttpStatusCode]::OK
+                            # Continuation token from the previous page's Metadata.nextLink; opaque to callers.
+                            Body       = Get-CIPPReportPage -TenantFilter $TenantFilter -Type 'CalendarPermissions' -PageSize $PageSize -ContinuationToken $Request.Query.nextLink -Report { param($Tenant) Get-CIPPCalendarPermissionReport -TenantFilter $Tenant -ByUser:($ByUser -eq 'true') }
+                        })
+                }
                 $GraphRequest = Get-CIPPCalendarPermissionReport @ReportParams
                 $StatusCode = [HttpStatusCode]::OK
             } catch {
@@ -64,7 +77,7 @@ function Invoke-ListCalendarPermissions {
         $StatusCode = [HttpStatusCode]::OK
     } catch {
         $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-        $StatusCode = [HttpStatusCode]::Forbidden
+        $StatusCode = [HttpStatusCode]::InternalServerError
         $GraphRequest = $ErrorMessage
     }
 

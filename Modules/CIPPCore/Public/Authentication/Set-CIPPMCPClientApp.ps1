@@ -6,9 +6,9 @@ function Set-CIPPMCPClientApp {
         In the split-app model an MCPAllowed API client is one of the apps an AI connector signs in
         AS (the OAuth client), while the dedicated CIPP-MCP app (New-CIPPMcpResourceApp) is the
         protected resource the token is for. Several MCPAllowed clients can coexist, each with its own
-        role, IP range, redirect URIs and Conditional Access; every one is in EasyAuth
-        allowedApplications and CIPP resolves the caller's role from its appId (azp), so keeping them
-        as distinct app registrations is what makes per-client permissions and CA work.
+        redirect URIs, and every one is in EasyAuth allowedApplications. A connector that signs a user
+        in (PKCE or client secret) runs with that user's CIPP role; the client's own role and IP range
+        apply only to app-only (client credentials) tokens.
 
         This ensures the resource app exists, then configures THIS client: the known MCP client
         callbacks (public for the PKCE clients, web for Copilot Studio), "allow public client flows",
@@ -43,7 +43,16 @@ function Set-CIPPMCPClientApp {
     $ResourceObjectId = $Resource.ObjectId
     $ScopeId = $Resource.ScopeId
 
-    $App = New-GraphGetRequest -uri "https://graph.microsoft.com/v1.0/applications(appId='$AppId')" -NoAuthCheck $true -AsApp $true
+    # A client created moments ago may not have replicated yet.
+    $App = $null
+    for ($Attempt = 1; $Attempt -le 6 -and -not $App; $Attempt++) {
+        try {
+            $App = New-GraphGetRequest -uri "https://graph.microsoft.com/v1.0/applications(appId='$AppId')" -NoAuthCheck $true -AsApp $true
+        } catch {
+            if ($Attempt -eq 6 -or $_.Exception.Message -notmatch 'does not exist or one of its queried reference-property objects are not present') { throw }
+        }
+        if (-not $App -and $Attempt -lt 6) { Start-Sleep -Seconds 3 }
+    }
     if (-not $App) {
         throw "App registration with AppId '$AppId' was not found."
     }
@@ -109,7 +118,15 @@ function Set-CIPPMCPClientApp {
     } | ConvertTo-Json -Depth 10 -Compress
 
     if ($PSCmdlet.ShouldProcess($AppId, 'Configure API client as MCP OAuth client')) {
-        $null = New-GraphPOSTRequest -uri "https://graph.microsoft.com/v1.0/applications/$($App.id)" -type PATCH -body $PatchBody -NoAuthCheck $true -asapp $true
+        for ($Attempt = 1; $Attempt -le 6; $Attempt++) {
+            try {
+                $null = New-GraphPOSTRequest -uri "https://graph.microsoft.com/v1.0/applications/$($App.id)" -type PATCH -body $PatchBody -NoAuthCheck $true -asapp $true
+                break
+            } catch {
+                if ($Attempt -eq 6 -or $_.Exception.Message -notmatch 'does not exist or one of its queried reference-property objects are not present') { throw }
+                Start-Sleep -Seconds 3
+            }
+        }
         Write-LogMessage -headers $Headers -API 'ExecApiClient' -message "Configured API client $AppId as an MCP OAuth client (callbacks, public client flows, resource permissions) against resource $ResourceAppId." -Sev 'Info'
 
         # OIDC + offline_access on Graph are admin-consented tenant-wide (they can't be

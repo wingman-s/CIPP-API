@@ -11,7 +11,8 @@ function Add-CIPPDelegatedPermission {
     $ApplicationId = $ApplicationId ?? $env:ApplicationID
     Set-Location (Get-Item $PSScriptRoot).FullName
 
-    if ($ApplicationId -eq $env:ApplicationID -and $TenantFilter -eq $env:TenantID) {
+    $IsPartnerTenant = $TenantFilter -eq 'PartnerTenant' -or $TenantFilter -eq $env:TenantID -or [bool](Get-CIPPPartnerTenant -PartnerTenantId $TenantFilter)
+    if ($ApplicationId -eq $env:ApplicationID -and $IsPartnerTenant) {
         #return @('Cannot modify delgated permissions for CIPP-SAM on partner tenant')
         $RequiredResourceAccess = 'CIPPDefaults'
     }
@@ -36,7 +37,7 @@ function Add-CIPPDelegatedPermission {
             $RequiredResourceAccess.Add($Resource)
         }
 
-        if ($TenantFilter -eq $env:TenantID -or $TenantFilter -eq 'PartnerTenant') {
+        if ($IsPartnerTenant) {
             $RequiredResourceAccess = $RequiredResourceAccess + ($AdditionalPermissions | Where-Object { $RequiredResourceAccess.resourceAppId -notcontains $_.resourceAppId })
         } else {
             # remove the partner center permission if not pushing to partner tenant
@@ -73,8 +74,15 @@ function Add-CIPPDelegatedPermission {
     $Results = [System.Collections.Generic.List[string]]::new()
 
     $ourSVCPrincipal = $ServicePrincipalList | Where-Object -Property AppId -EQ $ApplicationId | Select-Object -First 1
-    if (!$ourSVCPrincipal) {
-        $ourSvcPrincipal = New-GraphGETRequest -uri "https://graph.microsoft.com/beta/servicePrincipals(appId='$ApplicationId')?`$select=appId,id,displayName" -tenantid $TenantFilter -skipTokenCache $true -NoAuthCheck $true
+    foreach ($Delay in 0, 2, 4, 8, 16) {
+        if ($ourSVCPrincipal) { break }
+        # A service principal created moments ago can take a while to replicate.
+        Start-Sleep -Seconds $Delay
+        try {
+            $ourSVCPrincipal = New-GraphGETRequest -uri "https://graph.microsoft.com/beta/servicePrincipals(appId='$ApplicationId')?`$select=appId,id,displayName" -tenantid $TenantFilter -skipTokenCache $true -NoAuthCheck $true
+        } catch {
+            Write-Information "Service principal for $ApplicationId not found in $TenantFilter yet: $($_.Exception.Message)"
+        }
     }
     if (!$ourSVCPrincipal) {
         $Results.Add("Failed to find service principal for application $ApplicationId in tenant $TenantFilter")

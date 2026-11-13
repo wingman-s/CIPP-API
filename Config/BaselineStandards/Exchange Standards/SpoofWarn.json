@@ -15,7 +15,6 @@
   "appliesToTest": [
     "CISAMSEXO71",
     "CIS_6_2_3",
-    "ORCA111",
     "ORCA240"
   ],
   "recommendedBy": [
@@ -47,12 +46,10 @@
       "default": []
     }
   },
-  "expected": {
-    "Enabled": "%externalWarningEnabled%"
-  },
   "read": {
     "cacheType": "ExoExternalInOutlook"
   },
+  "prepare": "Get-CIPPBaselineSpoofWarnState",
   "remediate": {
     "executor": "ExoRequest",
     "cmdlets": [

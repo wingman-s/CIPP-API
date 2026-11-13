@@ -37,12 +37,6 @@ function Get-CIPPStandards {
             $_.runManually -eq $runManually
         }
 
-    if ($TemplateId -ne '*' -and ![string]::IsNullOrEmpty($TemplateId)) {
-        $Templates = $Templates | Where-Object {
-            $_.GUID -like $TemplateId
-        }
-    }
-
     # 1.5. Expand templates that contain TemplateList-Tags into multiple standards
     $ExpandedTemplates = foreach ($Template in $Templates) {
         Write-Information "Template $($Template.templateName) ($($Template.GUID)) processing..."
@@ -354,7 +348,12 @@ function Get-CIPPStandards {
                             $TemplateKey = if ($CurrentStandard.TemplateList.value) { $CurrentStandard.TemplateList.value } else { '' }
                             $Key = "$StandardName|$TemplateKey"
 
-                            $ComputedStandards[$Key] = $CurrentStandard
+                            # Single-instance *Template standards (e.g. GroupTemplate) accumulate across AllTenants templates like the other tiers.
+                            if ($ComputedStandards.ContainsKey($Key)) {
+                                $ComputedStandards[$Key] = Merge-CippStandards -Existing $ComputedStandards[$Key] -New $CurrentStandard -StandardName $StandardName
+                            } else {
+                                $ComputedStandards[$Key] = $CurrentStandard
+                            }
                         }
                     }
                 }

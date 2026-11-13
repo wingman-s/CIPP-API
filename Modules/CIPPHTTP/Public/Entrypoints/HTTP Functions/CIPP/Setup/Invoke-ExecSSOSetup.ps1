@@ -14,6 +14,16 @@ function Invoke-ExecSSOSetup {
     $Action = $Request.Body.Action ?? $Request.Query.Action ?? 'Status'
     $MigrationTable = Get-CIPPTable -tablename 'SSOMigration'
 
+    # Restricted multi-tenant mode: other tenant IDs allowed to sign in when multi-tenant (Update only)
+    $AllowedTenants = @(foreach ($Tenant in @($Request.Body.allowedTenants)) {
+            $Value = [string]($Tenant.value ?? $Tenant)
+            if ($Value) { $Value.Trim().ToLower() }
+        })
+    $InvalidTenant = $AllowedTenants.Where({ -not ($_ -as [guid]) }, 'First')
+    if ($InvalidTenant) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ Results = "'$($InvalidTenant[0])' is not a tenant ID" } })
+    }
+
     # Resolve the redirect URI once for any action that needs it
     $ResolveTargetUrl = {
         param($BodyUrl)
@@ -111,6 +121,7 @@ function Invoke-ExecSSOSetup {
                                 status          = $MigrationStatus
                                 appId           = $ClientId
                                 multiTenant     = $IsMultiTenant
+                                allowedTenants  = @(([Environment]::GetEnvironmentVariable('WEBSITE_AUTH_AAD_ALLOWED_TENANTS') ?? '') -split ',' | Where-Object { $_ -and $_ -ne $env:TenantID })
                                 tenantId        = $IssuerTenantId
                                 issuer          = $Issuer
                                 audiences       = $AllowedAudiences
@@ -199,6 +210,19 @@ function Invoke-ExecSSOSetup {
                 }
             } catch {
                 Write-Information "[SSO-Setup] Redirect URI status check failed (non-fatal): $($_.Exception.Message)"
+            }
+
+            # Best-effort: the card shows when the newest SSO secret expires; the token timer rotates it.
+            if ($Body.Results -is [hashtable] -and $Body.Results.appId) {
+                try {
+                    $SSOApp = New-GraphGetRequest -uri "https://graph.microsoft.com/v1.0/applications(appId='$($Body.Results.appId)')?`$select=passwordCredentials" -AsApp $true -NoAuthCheck $true
+                    $NewestSecret = $SSOApp.passwordCredentials | Sort-Object -Property endDateTime -Descending | Select-Object -First 1
+                    $Body.Results.secretExpires = $NewestSecret.endDateTime
+                    $Body.Results.secretKeyId = $NewestSecret.keyId
+                } catch {
+                    $Body.Results.secretExpires = $null
+                    $Body.Results.secretKeyId = $null
+                }
             }
         }
 
@@ -539,14 +563,17 @@ function Invoke-ExecSSOSetup {
 
                 # Update EasyAuth ARM config on the App Service (issuer URL + allowed tenants)
                 try {
-                    Set-CIPPSSOEasyAuth -AppId $Existing.AppId -MultiTenant $MultiTenant -TenantId $env:TenantID
+                    # A request without allowedTenants keeps the current restriction
+                    $EasyAuthParams = @{ AppId = $Existing.AppId; MultiTenant = $MultiTenant; TenantId = $env:TenantID }
+                    if ($null -ne $Request.Body.allowedTenants) { $EasyAuthParams.AllowedTenants = $AllowedTenants }
+                    Set-CIPPSSOEasyAuth @EasyAuthParams
                 } catch {
                     Write-Information "[SSO-Update] EasyAuth ARM update skipped (may not be in App Service): $($_.Exception.Message)"
                 }
 
                 $Body = @{
                     Results = @{
-                        message     = "SSO app updated successfully. Sign-in audience is now $SignInAudience."
+                        message     = "SSO app updated successfully. Sign-in audience is now $SignInAudience.$(if ($MultiTenant -and $AllowedTenants.Count -gt 0) { " Sign-in is restricted to this tenant and $($AllowedTenants.Count) other tenant(s)." })"
                         appId       = $Existing.AppId
                         multiTenant = $MultiTenant
                         severity    = 'success'
@@ -593,7 +620,9 @@ function Invoke-ExecSSOSetup {
 
                 & $SaveMigrationRow @{ LastError = '' }
 
-                Write-LogMessage -API $APIName -headers $Headers -message "SSO app secret rotated for $($Existing.AppId)" -sev Info
+                $Actor = 'CIPP'
+                try { $Actor = ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Headers.'x-ms-client-principal')) | ConvertFrom-Json).userDetails ?? 'CIPP' } catch { }
+                Write-LogMessage -API $APIName -headers $Headers -tenant 'Global' -message "Manual rotation by $Actor`: new CIPP-SSO client secret created for $($Existing.AppId)" -sev Alert
                 $Body = @{
                     Results = @{
                         message  = 'Client secret rotated successfully. The new secret will be picked up from Key Vault on next restart.'
@@ -602,7 +631,7 @@ function Invoke-ExecSSOSetup {
                 }
             } catch {
                 $ErrorMessage = Get-CippException -Exception $_
-                Write-LogMessage -API $APIName -headers $Headers -message "SSO secret rotation failed: $($ErrorMessage.NormalizedError)" -sev Error -LogData $ErrorMessage
+                Write-LogMessage -API $APIName -headers $Headers -tenant 'Global' -message "SSO secret rotation failed: $($ErrorMessage.NormalizedError)" -sev Error -LogData $ErrorMessage
                 $StatusCode = [HttpStatusCode]::InternalServerError
                 $Body = @{ Results = "Secret rotation failed: $($ErrorMessage.NormalizedError)" }
             }

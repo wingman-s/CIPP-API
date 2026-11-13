@@ -32,6 +32,9 @@ function Invoke-NinjaOneExtensionScheduler {
     $CIPPMapping = Get-CIPPTable -TableName CippMapping
     $Filter = "PartitionKey eq 'NinjaOneMapping'"
     $TenantsToProcess = Get-AzDataTableEntity @CIPPMapping -Filter $Filter | Where-Object { $Null -ne $_.IntegrationId -and $_.IntegrationId -ne '' }
+    # Names each queued sync after its tenant (mapping rows only carry the tenant id).
+    $TenantDomains = @{}
+    $InstanceId = $null
 
     # Same check as the integration test button, once, before queuing a task per mapped tenant.
     $ApiCheck = {
@@ -46,8 +49,10 @@ function Invoke-NinjaOneExtensionScheduler {
             Write-LogMessage -API 'NinjaOneSync' -message "NinjaOne API check failed, daily synchronization not queued for $(($TenantsToProcess | Measure-Object).count) tenants. Test the NinjaOne integration in Extensions." -Sev 'Error'
             $TenantsToProcess = @()
         }
+        if ($TenantsToProcess) { foreach ($T in Get-Tenants -IncludeErrors) { $TenantDomains[$T.customerId] = $T.defaultDomainName } }
         $Batch = foreach ($Tenant in $TenantsToProcess | Sort-Object lastEndTime) {
             [PSCustomObject]@{
+                'TenantFilter' = $TenantDomains[$Tenant.RowKey] ?? $Tenant.RowKey
                 'NinjaAction'  = 'SyncTenant'
                 'MappedTenant' = $Tenant
                 'FunctionName' = 'NinjaOneQueue'
@@ -57,7 +62,9 @@ function Invoke-NinjaOneExtensionScheduler {
         if (($Batch | Measure-Object).Count -gt 0) {
             $InputObject = [PSCustomObject]@{
                 OrchestratorName = 'NinjaOneOrchestrator'
+                AllowCollision   = $false
                 Priority         = 6
+                MaxConcurrency   = 4
                 Batch            = @($Batch)
             }
             #Write-Host ($InputObject | ConvertTo-Json)
@@ -72,7 +79,8 @@ function Invoke-NinjaOneExtensionScheduler {
         }
         Add-AzDataTableEntity @Table -Entity $AddObject -Force
 
-        Write-LogMessage -API 'NinjaOneSync' -message "NinjaOne Daily Synchronization Queued for $(($TenantsToProcess | Measure-Object).count) Tenants" -Sev 'Info'
+        $Queued = if ("$InstanceId" -like '*-Skipped') { 'Skipped (a NinjaOne sync is still running)' } else { 'Queued' }
+        Write-LogMessage -API 'NinjaOneSync' -message "NinjaOne Daily Synchronization $Queued for $(($TenantsToProcess | Measure-Object).count) Tenants" -Sev 'Info'
 
     } else {
         if ($LastRunTime -lt (Get-Date).AddMinutes(-90)) {
@@ -94,8 +102,10 @@ function Invoke-NinjaOneExtensionScheduler {
                 Write-LogMessage -API 'NinjaOneSync' -message "NinjaOne API check failed, catchup synchronization not queued for $(($CatchupTenants | Measure-Object).count) tenants. Test the NinjaOne integration in Extensions." -Sev 'Warning'
                 $CatchupTenants = @()
             }
+            if ($CatchupTenants) { foreach ($T in Get-Tenants -IncludeErrors) { $TenantDomains[$T.customerId] = $T.defaultDomainName } }
             $Batch = foreach ($Tenant in $CatchupTenants) {
                 [PSCustomObject]@{
+                    TenantFilter = $TenantDomains[$Tenant.RowKey] ?? $Tenant.RowKey
                     NinjaAction  = 'SyncTenant'
                     MappedTenant = $Tenant
                     FunctionName = 'NinjaOneQueue'
@@ -104,7 +114,9 @@ function Invoke-NinjaOneExtensionScheduler {
             if (($Batch | Measure-Object).Count -gt 0) {
                 $InputObject = [PSCustomObject]@{
                     OrchestratorName = 'NinjaOneOrchestrator'
+                    AllowCollision   = $false
                     Priority         = 6
+                    MaxConcurrency   = 4
                     Batch            = @($Batch)
                 }
                 #Write-Host ($InputObject | ConvertTo-Json)
@@ -113,7 +125,8 @@ function Invoke-NinjaOneExtensionScheduler {
             }
 
             if (($CatchupTenants | Measure-Object).count -gt 0) {
-                Write-LogMessage -API 'NinjaOneSync' -message "NinjaOne Synchronization Catchup Queued for $(($CatchupTenants | Measure-Object).count) Tenants" -Sev 'Info'
+                $Queued = if ("$InstanceId" -like '*-Skipped') { 'Skipped (a NinjaOne sync is still running)' } else { 'Queued' }
+                Write-LogMessage -API 'NinjaOneSync' -message "NinjaOne Synchronization Catchup $Queued for $(($CatchupTenants | Measure-Object).count) Tenants" -Sev 'Info'
             }
 
         }

@@ -1,7 +1,7 @@
 function Invoke-ListDBCache {
     <#
     .FUNCTIONALITY
-        Entrypoint,AnyTenant
+        Entrypoint,AnyTenant,TenantGroup
     .ROLE
         CIPP.Core.Read
     .DESCRIPTION
@@ -125,7 +125,10 @@ function Invoke-ListDBCache {
         } else {
             $Tenant = (Get-Tenants -TenantFilter $TenantFilter).defaultDomainName
             if (-not $Tenant) {
-                throw "Tenant '$TenantFilter' not found"
+                return ([HttpResponseContext]@{
+                        StatusCode = [HttpStatusCode]::NotFound
+                        Body       = @{ Results = "Tenant '$TenantFilter' not found" }
+                    })
             }
         }
 
@@ -146,7 +149,10 @@ function Invoke-ListDBCache {
 
             # A single-tenant request would otherwise be unguarded now that AnyTenant is set.
             if (-not $IsAllTenants -and -not $AllowedDomains.Contains([string]$Tenant)) {
-                throw 'Access to this tenant is not allowed'
+                return ([HttpResponseContext]@{
+                        StatusCode = [HttpStatusCode]::Forbidden
+                        Body       = @{ Results = 'Access to this tenant is not allowed' }
+                    })
             }
         }
 
@@ -159,12 +165,19 @@ function Invoke-ListDBCache {
                 $Rows = @($Rows | Where-Object { $AllowedDomains.Contains([string]$_.PartitionKey) })
             }
 
-            $Results = @($Rows | ForEach-Object {
+            # Scheduled: the nightly run refreshes this type, so its age means something
+            $Scheduled = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($Entry in (Get-CIPPDBCacheSchedule).GetEnumerator()) {
+                if ($Entry.Value.Types) { $Scheduled.UnionWith([string[]]$Entry.Value.Types) } else { [void]$Scheduled.Add($Entry.Key) }
+            }
+            $Results = @(foreach ($Row in $Rows) {
+                    $RowType = $Row.RowKey -replace '-Count$', ''
                     [PSCustomObject]@{
-                        Tenant      = $_.PartitionKey
-                        Type        = $_.RowKey -replace '-Count$', ''
-                        Count       = $_.DataCount
-                        LastRefresh = $_.Timestamp
+                        Tenant      = $Row.PartitionKey
+                        Type        = $RowType
+                        Count       = $Row.DataCount
+                        LastRefresh = $Row.Timestamp
+                        Scheduled   = $Scheduled.Contains($RowType)
                     }
                 })
 
@@ -209,6 +222,25 @@ function Invoke-ListDBCache {
             return ([HttpResponseContext]@{
                     StatusCode = [HttpStatusCode]::OK
                     Body       = @{ Results = $Types }
+                })
+        }
+
+        # Return one page per request as { Results, Metadata } with a continuation token in Metadata.nextLink.
+        # latestOnly, groupBy and top do not apply to paged reads.
+        if ($Request.Query.manualPagination -eq $true) {
+            # Cached rows per page, clamped between 250 and 10000. Defaults to 5000. Pages hold whole tenants.
+            $PageSize = $Request.Query.PageSize -as [int]
+            return ([HttpResponseContext]@{
+                    StatusCode = [HttpStatusCode]::OK
+                    # Continuation token from the previous page's Metadata.nextLink; opaque to callers.
+                    Body       = Get-CIPPReportPage -TenantFilter $(if ($IsAllTenants) { 'AllTenants' } else { $Tenant }) -Type $Type -PageSize $PageSize -ContinuationToken $Request.Query.nextLink -Report {
+                        param($PageTenant)
+                        if ($null -eq $AllowedDomains -or $AllowedDomains.Contains([string]$PageTenant)) {
+                            $PageParams = @{ TenantFilter = $PageTenant; Type = $Type }
+                            if ($SelectFields) { $PageParams.Fields = $SelectFields }
+                            New-CIPPDbRequest @PageParams
+                        }
+                    }
                 })
         }
 
@@ -274,7 +306,7 @@ function Invoke-ListDBCache {
         $ErrorMessage = Get-CippException -Exception $_
         Write-LogMessage -API $APIName -tenant $TenantFilter -message "Failed to list DB cache: $($ErrorMessage.NormalizedError)" -sev Error -LogData $ErrorMessage
         return ([HttpResponseContext]@{
-                StatusCode = [HttpStatusCode]::BadRequest
+                StatusCode = [HttpStatusCode]::InternalServerError
                 Body       = @{ Results = $ErrorMessage.NormalizedError }
             })
     }

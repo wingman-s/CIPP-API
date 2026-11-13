@@ -32,6 +32,12 @@ function Get-CIPPDomainAnalyser {
             return $CachedEntry.Results
         }
     }
+    if ($script:CIPPDomainAnalyserSweep -lt $CacheNow) {
+        foreach ($Key in @($script:CIPPDomainAnalyserCache.PSBase.Keys)) {
+            if (($CacheNow - $script:CIPPDomainAnalyserCache[$Key].Timestamp) -ge 300) { $script:CIPPDomainAnalyserCache.Remove($Key) }
+        }
+        $script:CIPPDomainAnalyserSweep = $CacheNow + 60
+    }
 
     $DomainTable = Get-CIPPTable -Table 'Domains'
 
@@ -53,7 +59,8 @@ function Get-CIPPDomainAnalyser {
                     # Add DkimSelectors from the domain entity if available
                     if (![string]::IsNullOrEmpty($Domain.DkimSelectors)) {
                         $Selectors = $Domain.DkimSelectors | ConvertFrom-Json -ErrorAction SilentlyContinue
-                        $Object | Add-Member -NotePropertyName 'DkimSelectors' -NotePropertyValue ($Selectors) -Force
+                        $Object.PSObject.Properties.Remove('DkimSelectors')
+                        $Object.PSObject.Properties.Add([psnoteproperty]::new('DkimSelectors', $Selectors))
                     }
                     $Object
                 }

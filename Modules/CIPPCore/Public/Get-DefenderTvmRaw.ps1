@@ -11,7 +11,9 @@ function Get-DefenderTvmRaw {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$TenantId,
-        [switch]$Stream
+        [switch]$Stream,
+        # Only these fields are materialised on each record; the rest of the ~1 KB wire record is never built.
+        [string[]]$Property
     )
 
     try {
@@ -24,6 +26,9 @@ function Get-DefenderTvmRaw {
         $Buffer = if ($Stream) { $null } else { [System.Collections.Generic.List[object]]::new() }
         $Client = [System.Net.Http.HttpClient]::new()
         $Client.Timeout = [TimeSpan]::FromMinutes(30)
+        # Disposing the client aborts a stalled download when Craft stops the pipeline.
+        $StopToken = $PSCmdlet.PipelineStopToken ?? $global:CraftPipelineStopToken
+        $OnStop = if ($StopToken) { $StopToken.Register([Action]$Client.Dispose) }
         try {
             foreach ($Url in $Files) {
                 $NetStream = $Client.GetStreamAsync($Url).GetAwaiter().GetResult()
@@ -32,7 +37,7 @@ function Get-DefenderTvmRaw {
                 try {
                     while ($null -ne ($Line = $Reader.ReadLine())) {
                         if (-not $Line) { continue }
-                        $Record = $Line | ConvertFrom-Json
+                        $Record = if ($Property) { [CIPP.CippJson]::ConvertFromJson($Line, $Property) } else { $Line | ConvertFrom-Json }
                         if ($Stream) { $Record } else { $Buffer.Add($Record) }
                     }
                 } finally {
@@ -40,6 +45,7 @@ function Get-DefenderTvmRaw {
                 }
             }
         } finally {
+            if ($OnStop) { $OnStop.Dispose() }
             $Client.Dispose()
         }
 

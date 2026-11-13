@@ -16,6 +16,7 @@ function Invoke-ExecDurableFunctions {
     $Yesterday = (Get-Date).AddDays(-1).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     $Filter = "CreatedTime ge datetime'$Yesterday' or RuntimeStatus eq 'Pending' or RuntimeStatus eq 'Running'"
     $Instances = Get-CippAzDataTableEntity @InstancesTable -Filter $Filter
+    $StatusCode = [HttpStatusCode]::OK
 
     switch ($Request.Query.Action) {
         'ListOrchestrators' {
@@ -46,7 +47,7 @@ function Invoke-ExecDurableFunctions {
         'ListOrchestratorHistory' {
             if ($Request.Query.PartitionKey) {
                 $HistoryTable = Get-CippTable -TableName ('{0}History' -f $FunctionName)
-                $Filter = "PartitionKey eq '{0}'" -f $Request.Query.PartitionKey
+                $Filter = "PartitionKey eq '{0}'" -f (ConvertTo-CIPPODataFilterValue -Value $Request.Query.PartitionKey)
                 $History = Get-CippAzDataTableEntity @HistoryTable -Filter $Filter -Property PartitionKey, RowKey, Timestamp, EventType, Name, IsPlayed, OrchestrationStatus | Select-Object * -ExcludeProperty ETag
 
                 $Body = [PSCustomObject]@{
@@ -127,6 +128,7 @@ function Invoke-ExecDurableFunctions {
                 }
 
             } catch {
+                $StatusCode = [HttpStatusCode]::InternalServerError
                 $Body = [PSCustomObject]@{
                     Message   = "Error resetting durables: $($_.Exception.Message)"
                     Exception = Get-CippException -Exception $_
@@ -136,11 +138,11 @@ function Invoke-ExecDurableFunctions {
         'PurgeOrchestrators' {
             $HistoryTable = Get-CippTable -TableName ('{0}History' -f $FunctionName)
             if ($Request.Query.PartitionKey) {
-                $HistoryEntities = Get-CIPPAzDataTableEntity @HistoryTable -Filter "PartitionKey eq '$($Request.Query.PartitionKey)'" -Property RowKey, PartitionKey
+                $HistoryEntities = Get-CIPPAzDataTableEntity @HistoryTable -Filter "PartitionKey eq '$(ConvertTo-CIPPODataFilterValue -Value $Request.Query.PartitionKey)'" -Property RowKey, PartitionKey
                 if ($HistoryEntities) {
                     Remove-CIPPAzDataTableEntity -Force @HistoryTable -Entity $HistoryEntities
                 }
-                $Instance = Get-CIPPAzDataTableEntity @InstancesTable -Filter "PartitionKey eq '$($Request.Query.PartitionKey)'" -Property RowKey, PartitionKey
+                $Instance = Get-CIPPAzDataTableEntity @InstancesTable -Filter "PartitionKey eq '$(ConvertTo-CIPPODataFilterValue -Value $Request.Query.PartitionKey)'" -Property RowKey, PartitionKey
                 if ($Instance) {
                     Remove-CIPPAzDataTableEntity -Force @InstancesTable -Entity $Instance
                 }
@@ -171,7 +173,7 @@ function Invoke-ExecDurableFunctions {
     }
 
     return ([HttpResponseContext]@{
-            StatusCode = [HttpStatusCode]::OK
+            StatusCode = $StatusCode
             Body       = $Body
         })
 }

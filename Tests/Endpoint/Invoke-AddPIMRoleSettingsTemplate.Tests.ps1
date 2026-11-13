@@ -25,6 +25,7 @@ BeforeAll {
 
     function Get-CIPPPIMRolePolicies { param($TenantFilter) }
     function Get-CippTable { param($tablename) @{} }
+    function Test-CippTemplateWriteAccess { param($Permission, $PartitionKey, $RowKey) $true }
     function Get-CIPPAzDataTableEntity { param($Filter) }
     function Add-CIPPAzDataTableEntity { param($Entity, $Force) }
     function ConvertTo-CIPPODataFilterValue { param($Value, $Type) $Value }
@@ -196,10 +197,10 @@ Describe 'Invoke-AddPIMRoleSettingsTemplate' {
             Should -Invoke Write-LogMessage -Times 3 -ParameterFilter { $Sev -eq 'Warning' -and $message -match 'raised to the secure floor' }
         }
 
-        It 'returns 400 when the role has no PIM policy in the tenant' {
+        It 'returns 404 when the role has no PIM policy in the tenant' {
             Mock Get-CIPPPIMRolePolicies { @() }
             $Response = Invoke-AddPIMRoleSettingsTemplate -Request (New-TemplateRequest -Body $script:CaptureBody)
-            $Response.StatusCode | Should -Be ([System.Net.HttpStatusCode]::BadRequest)
+            $Response.StatusCode | Should -Be ([System.Net.HttpStatusCode]::NotFound)
             ($Response.Body.Results -join ' ') | Should -Match 'No PIM role management policy'
             Should -Invoke Add-CIPPAzDataTableEntity -Times 0 -Exactly
         }

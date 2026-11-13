@@ -9,7 +9,8 @@ function Invoke-ExecBaselineOverride {
         one tenant. Presence is the override: the delta's expectedValue (the configured variable
         values) fully replaces what the baselines apply. The resolved row's §4.2 columns are
         updated immediately so the UI reflects the new effective configuration; the engine
-        enforces it on the next run.
+        enforces it on the next run. createOverride requires a reason and takes an optional
+        expiry, after which the next baseline run removes the override.
     #>
     [CmdletBinding()]
     param($Request, $TriggerMetadata)
@@ -20,8 +21,15 @@ function Invoke-ExecBaselineOverride {
         $TenantFilter = $Request.Body.tenantFilter
         $Standard = $Request.Body.standard
         if (-not ($Action -and $TenantFilter -and $Standard)) {
-            throw 'Provide action, tenantFilter, and standard.'
+            throw [System.ArgumentException]::new('Provide action, tenantFilter, and standard.')
         }
+        # Why this tenant differs from its baselines. Required to create an override.
+        $Reason = "$($Request.Body.reason)".Trim()
+        if ($Action -eq 'createOverride' -and -not $Reason) {
+            throw [System.ArgumentException]::new('A reason is required to create a tenant override.')
+        }
+        # Unix seconds after which the override stops applying. Empty keeps it until it is removed, unless the instance sets a maximum.
+        $Expires = if ($Action -eq 'createOverride') { Resolve-CIPPBaselineExpiry -Expires $Request.Body.expires }
 
         $User = ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Request.Headers.'x-ms-client-principal')) | ConvertFrom-Json).userDetails
         $DeltaTable = Get-CippTable -tablename 'Baselines'
@@ -30,7 +38,12 @@ function Invoke-ExecBaselineOverride {
         $SafeStandard = ConvertTo-CIPPODataFilterValue -Value $Standard
         # Ad-hoc tenant delta: templateId is empty per the design doc; the RK's last segment
         # is the literal 'adhoc'. '#' is not legal in Azure Table keys.
-        $DeltaRowKey = 'tenant_{0}-{1}-adhoc' -f $TenantFilter, ($Standard -replace '#', '~')
+        $Tenant = @(Get-Tenants -TenantFilter $TenantFilter -IncludeErrors)[0]
+        $TenantId = $Tenant.customerId ?? $TenantFilter
+        $DeltaRowKey = 'tenant_{0}-{1}-adhoc' -f $TenantId, ($Standard -replace '#', '~')
+        # Overrides saved before customerId keys carry one of the tenant's domains instead.
+        $TenantKeys = @($TenantId, $Tenant.defaultDomainName, $Tenant.initialDomainName, $TenantFilter) | Where-Object { $_ }
+        $ExistingDeltas = @(Get-CIPPAzDataTableEntity @DeltaTable -Filter "PartitionKey eq 'standardItem' and templateId eq '' and standardName eq '$SafeStandard'" | Where-Object { $_.scopeId -in $TenantKeys })
 
         $ResolvedEntity = Get-CIPPAzDataTableEntity @ResolvedTable -Filter "PartitionKey eq '$SafeTenant' and StandardName eq '$SafeStandard'"
         if (-not $ResolvedEntity) {
@@ -42,6 +55,8 @@ function Invoke-ExecBaselineOverride {
         switch ($Action) {
             'createOverride' {
                 $Variables = $Request.Body.variables ?? [PSCustomObject]@{}
+                $LegacyDeltas = @($ExistingDeltas | Where-Object { $_.RowKey -ne $DeltaRowKey })
+                if ($LegacyDeltas.Count -gt 0) { Remove-CIPPAzDataTableEntity -Force @DeltaTable -Entity $LegacyDeltas }
                 $DeltaTable.Force = $true
                 Add-CIPPAzDataTableEntity @DeltaTable -Entity @{
                     PartitionKey     = 'standardItem'
@@ -49,13 +64,15 @@ function Invoke-ExecBaselineOverride {
                     standardName     = "$Standard"
                     templateId       = ''
                     scope            = 'tenant'
-                    scopeId          = "$TenantFilter"
+                    scopeId          = "$TenantId"
                     stage            = 1
                     expectedValue    = (ConvertTo-Json -Compress -Depth 100 -InputObject $Variables)
                     remediateEnabled = $true
                     alertEnabled     = $true
                     alertOnRemediate = $false
                     rolloutId        = ''
+                    reason           = $Reason
+                    expires          = $(if ($Expires) { "$Expires" } else { '' })
                     updatedBy        = "$User"
                     updatedAt        = [int64]([datetimeoffset]::UtcNow.ToUnixTimeSeconds())
                 }
@@ -98,19 +115,18 @@ function Invoke-ExecBaselineOverride {
                     $ResolvedTable.Force = $true
                     Add-CIPPAzDataTableEntity @ResolvedTable -Entity $ResolvedEntity
                 }
-                $Message = "Created a tenant override of $Standard for $TenantFilter."
-                $null = Add-CIPPBaselineHistoryEvent -TenantFilter $TenantFilter -Standard $Standard -Mode 'triage' -TriggeredBy $User -Outcome 'Override Created' -Detail 'Created a tenant override - its configured values replace what the baselines apply'
+                $ExpiresText = if ($Expires) { ' It expires on {0:yyyy-MM-dd}.' -f [datetimeoffset]::FromUnixTimeSeconds($Expires).UtcDateTime }
+                $Message = "Created a tenant override of $Standard for $TenantFilter.$ExpiresText"
+                $null = Add-CIPPBaselineHistoryEvent -TenantFilter $TenantFilter -Standard $Standard -Mode 'triage' -TriggeredBy $User -Outcome 'Override Created' -Detail "Created a tenant override - its configured values replace what the baselines apply: $Reason.$ExpiresText"
             }
             'deleteOverride' {
-                $SafeDeltaRowKey = ConvertTo-CIPPODataFilterValue -Value $DeltaRowKey
-                $DeltaEntity = Get-CIPPAzDataTableEntity @DeltaTable -Filter "PartitionKey eq 'standardItem' and RowKey eq '$SafeDeltaRowKey'"
-                if ($DeltaEntity) {
-                    Remove-CIPPAzDataTableEntity -Force @DeltaTable -Entity $DeltaEntity
+                if ($ExistingDeltas.Count -gt 0) {
+                    Remove-CIPPAzDataTableEntity -Force @DeltaTable -Entity $ExistingDeltas
                 }
 
                 # An ad-hoc-only resolved row (empty TemplateId) has nothing to fall back to -
                 # delete it so the standard disappears from the view with its override.
-                if ($ResolvedEntity -and -not $ResolvedEntity.TemplateId) {
+                if ($ResolvedEntity -and -not $ResolvedEntity.TemplateId -and -not ($ResolvedEntity.Inheritance -and @(($ResolvedEntity.Inheritance | ConvertFrom-Json) | Where-Object { $_ -and $_.templateName -ne 'Tenant Override' }).Count)) {
                     Remove-CIPPAzDataTableEntity -Force @ResolvedTable -Entity $ResolvedEntity
                     $ResolvedEntity = $null
                 }
@@ -132,7 +148,7 @@ function Invoke-ExecBaselineOverride {
                 $null = Add-CIPPBaselineHistoryEvent -TenantFilter $TenantFilter -Standard $Standard -Mode 'triage' -TriggeredBy $User -Outcome 'Override Removed' -Detail 'Removed the tenant override - the standard falls back to the inherited configuration'
             }
             default {
-                throw "Unknown action '$Action'. Use createOverride or deleteOverride."
+                throw [System.ArgumentException]::new("Unknown action '$Action'. Use createOverride or deleteOverride.")
             }
         }
 
@@ -142,7 +158,7 @@ function Invoke-ExecBaselineOverride {
     } catch {
         Write-LogMessage -headers $Request.Headers -API $APIName -message "Failed to update override: $($_.Exception.Message)" -Sev 'Error'
         $Results = [pscustomobject]@{ Results = "Failed to update override: $($_.Exception.Message)" }
-        $StatusCode = [HttpStatusCode]::InternalServerError
+        $StatusCode = Get-CippErrorStatusCode -ErrorRecord $_
     }
 
     return ([HttpResponseContext]@{

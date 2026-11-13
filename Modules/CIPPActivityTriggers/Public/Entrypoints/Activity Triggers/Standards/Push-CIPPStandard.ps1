@@ -61,7 +61,7 @@ function Push-CIPPStandard {
         $StandardInfo.ConditionalAccessTemplateId = $Item.Settings.TemplateList.value
     }
 
-    if (-not (Get-Command -Name $FunctionName -Module CIPPStandards -ErrorAction SilentlyContinue)) {
+    if ($ExecutionContext.InvokeCommand.GetCommand($FunctionName, 'Function').ModuleName -ne 'CIPPStandards') {
         Write-LogMessage -tenant $Tenant -message "The standard $Standard was not found. This may have been deprecated or replaced with a new standard." -sev 'Warning' -API 'Standards'
         Write-Warning "Function $FunctionName not found"
         return
@@ -72,7 +72,8 @@ function Push-CIPPStandard {
     Set-CippStandardInfoContext -StandardInfo $StandardInfo
 
     # Store action source + template id for outbound User-Agent attribution
-    Set-CippUserAgentContext -Source 'standard' -TemplateId $Item.TemplateId
+    # Tiers merged into one GroupTemplate run carry several template ids
+    Set-CippUserAgentContext -Source 'standard' -TemplateId @($Item.TemplateId)[0]
 
     # ---- Standard execution telemetry ----
     $runId = [guid]::NewGuid().ToString()

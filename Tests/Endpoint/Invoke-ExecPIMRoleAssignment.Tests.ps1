@@ -22,7 +22,9 @@ BeforeAll {
     function Invoke-CIPPPIMAssignmentAction { param($TenantFilter, $Action, $PrincipalId, $RoleDefinitionId, $DirectoryScopeId, $AssignmentType, $Duration, $EndDateTime, $Justification, $TimeZone, $Headers, $APIName) }
     function Write-LogMessage { param($headers, $API, $tenant, $message, $Sev, $LogData) }
     function Get-CippException { param($Exception) @{ NormalizedError = "$Exception" } }
+    function Get-CIPPJITAdminAllowedRoles { param($Headers) [pscustomobject]@{ Restricted = $false; AllowedRoleIds = @() } }
 
+    . (Join-Path $RepoRoot 'Modules/CIPPCore/Public/Get-CippErrorStatusCode.ps1')
     . $FunctionPath
 
     function New-PimRequest {
@@ -152,12 +154,43 @@ Describe 'Invoke-ExecPIMRoleAssignment' {
             Should -Invoke Invoke-CIPPPIMAssignmentAction -Times 1 -Exactly -ParameterFilter { $Action -eq 'Remove' }
         }
 
-        It 'returns 400 with the refusal message when the action throws' {
-            Mock Invoke-CIPPPIMAssignmentAction { throw 'Refusing: last active Global Administrator' }
+        It 'returns 400 with the refusal message when the action refuses' {
+            Mock Invoke-CIPPPIMAssignmentAction { throw [System.ArgumentException]::new('Refusing: last active Global Administrator') }
             $Response = Invoke-ExecPIMRoleAssignment -Request (New-PimRequest @{ Action = 'Remove'; Duration = $null })
             $Response.StatusCode | Should -Be ([System.Net.HttpStatusCode]::BadRequest)
             $Response.Body.Results[0].state | Should -Be 'error'
             $Response.Body.Results[0].resultText | Should -Match 'last active Global Administrator'
+        }
+
+        It 'returns 500 when the Graph call fails' {
+            Mock Invoke-CIPPPIMAssignmentAction { throw 'Graph: InternalServerError' }
+            $Response = Invoke-ExecPIMRoleAssignment -Request (New-PimRequest @{ Action = 'Remove'; Duration = $null })
+            $Response.StatusCode | Should -Be ([System.Net.HttpStatusCode]::InternalServerError)
+            $Response.Body.Results[0].state | Should -Be 'error'
+        }
+    }
+
+    Context 'JIT role allow-list for restricted callers' {
+        BeforeEach {
+            Mock Get-CIPPJITAdminAllowedRoles { [pscustomobject]@{ Restricted = $true; AllowedRoleIds = @('729827e3-9c14-49f7-bb1b-9608f156bbb8') } }
+        }
+
+        It 'refuses <_> of a role outside the allow-list' -ForEach @('GrantActive', 'Extend', 'Renew') {
+            $Response = Invoke-ExecPIMRoleAssignment -Request (New-PimRequest @{ Action = $_ })
+            $Response.StatusCode | Should -Be ([System.Net.HttpStatusCode]::Forbidden)
+            Should -Invoke Invoke-CIPPPIMAssignmentAction -Times 0 -Exactly
+        }
+
+        It 'allows GrantActive of a role on the allow-list' {
+            $Response = Invoke-ExecPIMRoleAssignment -Request (New-PimRequest @{ RoleDefinitionId = '729827E3-9C14-49F7-BB1B-9608F156BBB8' })
+            $Response.StatusCode | Should -Be ([System.Net.HttpStatusCode]::OK)
+            Should -Invoke Invoke-CIPPPIMAssignmentAction -Times 1 -Exactly
+        }
+
+        It 'still allows <_>, which only reduces access' -ForEach @('Remove', 'ConvertToEligible') {
+            $Response = Invoke-ExecPIMRoleAssignment -Request (New-PimRequest @{ Action = $_; Duration = $null })
+            $Response.StatusCode | Should -Be ([System.Net.HttpStatusCode]::OK)
+            Should -Invoke Invoke-CIPPPIMAssignmentAction -Times 1 -Exactly
         }
     }
 }

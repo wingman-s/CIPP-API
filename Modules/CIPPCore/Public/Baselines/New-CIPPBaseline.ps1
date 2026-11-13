@@ -45,9 +45,13 @@ function New-CIPPBaseline {
     # Baseline-level record: metadata + ordered stage definitions (standards live on the deltas).
     $StageDefinitions = @($Baseline.stages | ForEach-Object {
             [PSCustomObject]@{
-                name       = $_.name
-                logic      = $_.logic ?? 'and'
-                conditions = @($_.conditions)
+                name            = $_.name
+                logic           = $_.logic ?? 'and'
+                conditions      = @($_.conditions | Where-Object { $_.type })
+                conditionGroups = @(foreach ($Group in @($_.conditionGroups)) {
+                        $GroupConditions = @($Group.conditions | Where-Object { $_.type })
+                        if ($GroupConditions.Count -gt 0) { [PSCustomObject]@{ logic = $Group.logic ?? 'and'; conditions = $GroupConditions } }
+                    })
             }
         })
     $RolloutTable = Get-CippTable -tablename 'BaselineRollouts'
@@ -60,17 +64,19 @@ function New-CIPPBaseline {
     # The editor round-trips the tenant selector's own option objects ({label, value,
     # type}) verbatim via assignedTo/excludedTo; the flat excludedTenants values keep
     # the exclusion logic simple. Raw string values are accepted everywhere too.
+    $TenantLookup = Get-CIPPTenantLookup
     $ExcludedValues = @($Baseline.excludedTenants | ForEach-Object {
-            if ($null -eq $_) { } elseif ($_ -is [string]) { $_ } else { "$($_.value)" }
-        } | Where-Object { $_ })
+            $Value = if ($null -eq $_) { } elseif ($_ -is [string]) { $_ } else { "$($_.value)" }
+            if ($Value) { $TenantLookup[$Value].customerId ?? $Value }
+        })
     $RolloutEntity = @{
         PartitionKey    = 'rollout'
         RowKey          = "$GUID"
         templateName    = "$($Baseline.templateName)"
         description     = "$($Baseline.description)"
-        assignedTo      = (ConvertTo-Json -Compress -Depth 10 -InputObject @($Baseline.assignedTenants))
-        excludedTo      = (ConvertTo-Json -Compress -Depth 10 -InputObject @($Baseline.excludedTenants))
-        excludedTenants = (ConvertTo-Json -Compress -Depth 10 -InputObject $ExcludedValues)
+        assignedTo      = [string](ConvertTo-Json -Compress -Depth 10 -InputObject @($Baseline.assignedTenants))
+        excludedTo      = [string](ConvertTo-Json -Compress -Depth 10 -InputObject @($Baseline.excludedTenants))
+        excludedTenants = [string](ConvertTo-Json -Compress -Depth 10 -InputObject $ExcludedValues)
         alertEmails     = "$($Baseline.alertEmails)"
         alertWebhookUrl = "$($Baseline.alertWebhookUrl)"
         # 'Disable Alerts': deviations are still detected and shown, but no email, webhook
@@ -81,7 +87,7 @@ function New-CIPPBaseline {
         # Negative flag on purpose: rows saved before the column existed default to
         # scheduled, exactly right.
         disableScheduledRuns = [bool]$Baseline.disableScheduledRuns
-        Stages          = (ConvertTo-Json -Compress -Depth 100 -InputObject $StageDefinitions)
+        Stages          = [string](ConvertTo-Json -Compress -Depth 100 -InputObject $StageDefinitions)
         updatedBy       = "$User"
         updatedAt       = $Now
         Source          = "$($Source ?? $ExistingRollout.Source)"
@@ -106,7 +112,8 @@ function New-CIPPBaseline {
     }
 
     $Groups = @()
-    try { $Groups = @(Get-TenantGroups) } catch { Write-Information "New-CIPPBaseline: tenant group lookup failed: $($_.Exception.Message)" }
+    $GroupsLoaded = $true
+    try { $Groups = @(Get-TenantGroups) } catch { $GroupsLoaded = $false; Write-Information "New-CIPPBaseline: tenant group lookup failed: $($_.Exception.Message)" }
     $Scopes = foreach ($Assignment in @($Baseline.assignedTenants)) {
         if ($null -eq $Assignment) { continue }
         # Selector option objects carry the key in .value; raw strings are the key itself.
@@ -115,12 +122,13 @@ function New-CIPPBaseline {
         if ($Value -eq 'AllTenants') {
             @{ scope = 'allTenants'; scopeId = 'AllTenants'; scopeName = 'AllTenants'; segment = 'allTenants' }
         } else {
-            # Group selections send the group ID; older saves round-tripped names. Accept both.
-            $Group = $Groups | Where-Object { $_.Id -eq $Value -or $_.Name -eq $Value } | Select-Object -First 1
+            # Group selections send the group ID; older saves round-tripped names. Accept both. The export placeholder is never a group.
+            $Group = if ($Value -ne 'Exported Template') { $Groups | Where-Object { $_.Id -eq $Value -or $_.Name -eq $Value } | Select-Object -First 1 }
             if ($Group) {
                 @{ scope = 'group'; scopeId = "$($Group.Id)"; scopeName = "$($Group.Name)"; segment = "group_$($Group.Id)" }
             } else {
-                @{ scope = 'tenant'; scopeId = $Value; scopeName = $Value; segment = "tenant_$Value" }
+                $TenantId = $TenantLookup[$Value].customerId ?? $Value
+                @{ scope = 'tenant'; scopeId = $TenantId; scopeName = $TenantLookup[$Value].defaultDomainName ?? $Value; segment = "tenant_$TenantId" }
             }
         }
     }
@@ -146,7 +154,7 @@ function New-CIPPBaseline {
                     scopeId          = "$($Scope.scopeId)"
                     scopeName        = "$($Scope.scopeName)"
                     stage            = $StageNumber
-                    expectedValue    = (ConvertTo-Json -Compress -Depth 100 -InputObject $Variables)
+                    expectedValue    = [string](ConvertTo-Json -Compress -Depth 100 -InputObject $Variables)
                     # A missing flag must never fail open into auto-remediation.
                     remediateEnabled = [bool]$(if ($Config -is [string]) { $false } else { $Config.remediateEnabled ?? $false })
                     alertEnabled     = [bool]$(if ($Config -is [string]) { $true } else { $Config.alertEnabled ?? $true })
@@ -169,10 +177,73 @@ function New-CIPPBaseline {
             $Instances.Add($(if ($Config -is [string]) { $Config } else { $Config.instance ?? $Config.standard }))
         }
     }
+    # Package members resolve as '<Member>#p<package suffix>-<template>' (Expand-CIPPBaselineTemplatePackage).
+    $PackagePrefixes = @($Instances | ForEach-Object { if ($_ -match '#(.+)$') { "#p$($Matches[1])-" } else { '#ppkg-' } })
     $ResolvedTable = Get-CippTable -tablename 'BaselineAlignment'
-    $Orphans = @(Get-CIPPAzDataTableEntity @ResolvedTable -Filter "TemplateId eq '$SafeGuid'" | Where-Object { $Instances -notcontains $_.StandardName })
-    if ($Orphans) {
-        Remove-CIPPAzDataTableEntity -Force @ResolvedTable -Entity $Orphans
+    $ResolvedRows = @(Get-CIPPAzDataTableEntity @ResolvedTable -Filter "TemplateId eq '$SafeGuid'")
+    $Orphans = [System.Collections.Generic.List[object]]::new()
+    foreach ($Row in $ResolvedRows) {
+        $Name = "$($Row.StandardName)"
+        if ($Instances -notcontains $Name -and -not ($PackagePrefixes | Where-Object { $Name.Contains($_) })) { $Orphans.Add($Row) }
+    }
+
+    # The same goes for tenants taken off this baseline (unassigned, excluded, or their group
+    # removed): their rows go, unless another baseline or an override still resolves the standard.
+    if ($GroupsLoaded) {
+        $ExpandDomains = {
+            param($Values)
+            foreach ($Value in $Values) {
+                $Group = $Groups | Where-Object { $_.Id -eq $Value } | Select-Object -First 1
+                if ($Group) { $Group.Members.defaultDomainName } else { $TenantLookup["$Value"].defaultDomainName ?? $Value }
+            }
+        }
+        $AllTenantsAssigned = @($Scopes | Where-Object { $_.scope -eq 'allTenants' }).Count -gt 0
+        $AssignedDomains = @(& $ExpandDomains @($Scopes | Where-Object { $_.scope -ne 'allTenants' } | ForEach-Object { $_.scopeId }))
+        $ExcludedDomains = @(& $ExpandDomains $ExcludedValues)
+        $Unassigned = @($ResolvedRows | Where-Object {
+                $Orphans -notcontains $_ -and ($ExcludedDomains -contains $_.PartitionKey -or -not ($AllTenantsAssigned -or $AssignedDomains -contains $_.PartitionKey))
+            })
+        if ($Unassigned.Count -gt 0) {
+            $StillResolved = @(Get-CIPPBaselineWorkItems -TenantFilter @($Unassigned.PartitionKey | Select-Object -Unique) | ForEach-Object { '{0}|{1}' -f $_.TenantFilter, $_.Standard })
+            foreach ($Row in $Unassigned) {
+                if ($StillResolved -notcontains ('{0}|{1}' -f $Row.PartitionKey, $Row.StandardName)) { $Orphans.Add($Row) }
+            }
+        }
+    }
+    if ($Orphans.Count -gt 0) {
+        Remove-CIPPAzDataTableEntity -Force @ResolvedTable -Entity @($Orphans)
+    }
+
+    # Tenant progress is stored as a stage number. When stages were removed, reordered or inserted, keep each
+    # tenant only as far as the leading stages it had already reached, so it never gains a stage it has not met.
+    $SourceStages = @($Baseline.stages | ForEach-Object { $_.sourceStage })
+    if ($ExistingRollout -and @($SourceStages.Where({ $_ })).Count -gt 0) {
+        $StateTable = Get-CippTable -tablename 'BaselineRolloutState'
+        $States = @(Get-CIPPAzDataTableEntity @StateTable -Filter "PartitionKey eq '$SafeGuid'")
+        $StateTable.Force = $true
+        foreach ($State in $States) {
+            $OldStage = [int]($State.currentStage ?? 1)
+            $NewStage = 0
+            foreach ($Source in $SourceStages) {
+                if (-not $Source -or [int]$Source -gt $OldStage) { break }
+                $NewStage++
+            }
+            $NewStage = [Math]::Max($NewStage, 1)
+            $SameStage = [int]$SourceStages[$NewStage - 1] -eq $OldStage
+            if ($NewStage -eq $OldStage -and $SameStage) { continue }
+            Add-CIPPAzDataTableEntity @StateTable -Entity @{
+                PartitionKey    = "$GUID"
+                RowKey          = "$($State.RowKey)"
+                currentStage    = $NewStage
+                enteredStageAt  = $(if ($SameStage) { $State.enteredStageAt } else { $Now })
+                firstDeployedAt = $State.firstDeployedAt ?? $State.enteredStageAt ?? $Now
+            }
+            if ($SameStage) { continue }
+            $TenantDomain = $TenantLookup["$($State.RowKey)"].defaultDomainName ?? "$($State.RowKey)"
+            $StageName = $Baseline.stages[$NewStage - 1].name
+            $null = Add-CIPPBaselineHistoryEvent -TenantFilter $TenantDomain -Standard $Baseline.templateName -Mode 'stage' -TriggeredBy $User -Outcome 'Stage Moved Back' -Detail "Moved back to stage $NewStage ($StageName) - its previous stage was removed or reordered"
+            Write-LogMessage -API 'Baselines' -tenant $TenantDomain -message "Moved $TenantDomain back to stage $NewStage ($StageName) of baseline $($Baseline.templateName) after its stages changed." -Sev 'Info'
+        }
     }
 
     @{ GUID = $GUID; DeltaCount = $DeltaCount }

@@ -20,9 +20,11 @@ function Invoke-ExecReportBuilderTemplate {
         switch ($Action) {
             'save' {
                 if ([string]::IsNullOrEmpty($Body.Name)) {
+                    $FailCode = [HttpStatusCode]::BadRequest
                     throw 'Template name is required'
                 }
                 if ($Body.Name.Length -gt 256) {
+                    $FailCode = [HttpStatusCode]::BadRequest
                     throw 'Template name must be 256 characters or fewer'
                 }
 
@@ -56,19 +58,22 @@ function Invoke-ExecReportBuilderTemplate {
             }
             'delete' {
                 if ([string]::IsNullOrEmpty($Body.GUID)) {
+                    $FailCode = [HttpStatusCode]::BadRequest
                     throw 'Template GUID is required for deletion'
                 }
 
-                $ExistingEntity = Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq 'ReportBuilderTemplate' and RowKey eq '$($Body.GUID)'"
+                $ExistingEntity = Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq 'ReportBuilderTemplate' and RowKey eq '$(ConvertTo-CIPPODataFilterValue -Value $Body.GUID)'"
                 if ($ExistingEntity) {
                     Remove-CIPPAzDataTableEntity @Table -Entity $ExistingEntity
                     Write-LogMessage -headers $Headers -API $APIName -message "Deleted report builder template '$($Body.GUID)'" -Sev 'Info'
                     $Result = @{ Results = 'Successfully deleted report builder template' }
                 } else {
+                    $FailCode = [HttpStatusCode]::NotFound
                     throw 'Template not found'
                 }
             }
             default {
+                $FailCode = [HttpStatusCode]::BadRequest
                 throw "Unknown action: $Action"
             }
         }
@@ -78,7 +83,7 @@ function Invoke-ExecReportBuilderTemplate {
         $ErrorMessage = Get-CippException -Exception $_
         Write-LogMessage -headers $Headers -API $APIName -message "Report builder template error: $($ErrorMessage.NormalizedError)" -Sev 'Error' -LogData $ErrorMessage
         $Result = @{ Results = "Error: $($ErrorMessage.NormalizedError)" }
-        $StatusCode = [HttpStatusCode]::BadRequest
+        $StatusCode = $FailCode ?? [HttpStatusCode]::InternalServerError
     }
 
     return ([HttpResponseContext]@{

@@ -15,6 +15,7 @@ function Invoke-ExecAppPermissionTemplate {
     $User = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Headers.'x-ms-client-principal')) | ConvertFrom-Json
 
     $Action = $Request.Query.Action ?? $Request.Body.Action
+    $StatusCode = [HttpStatusCode]::OK
 
     switch ($Action) {
         'Save' {
@@ -42,12 +43,13 @@ function Invoke-ExecAppPermissionTemplate {
                 $Body = @{
                     'Results' = $_.Exception.Message
                 }
+                $StatusCode = [HttpStatusCode]::InternalServerError
             }
         }
         'Delete' {
             try {
                 $TemplateId = $Request.Body.TemplateId
-                $Template = (Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq 'Templates' and RowKey eq '$TemplateId'")
+                $Template = (Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq 'Templates' and RowKey eq '$(ConvertTo-CIPPODataFilterValue -Value $TemplateId)'")
                 $TemplateName = $Template.TemplateName
 
                 if ($TemplateId) {
@@ -60,11 +62,13 @@ function Invoke-ExecAppPermissionTemplate {
                     $Body = @{
                         'Results' = 'No Template ID provided for deletion'
                     }
+                    $StatusCode = [HttpStatusCode]::BadRequest
                 }
             } catch {
                 $Body = @{
                     'Results' = "Failed to delete template: $($_.Exception.Message)"
                 }
+                $StatusCode = [HttpStatusCode]::InternalServerError
             }
         }
         default {
@@ -72,7 +76,7 @@ function Invoke-ExecAppPermissionTemplate {
             $filter = "PartitionKey eq 'Templates'"
             if ($Request.Query.TemplateId) {
                 $templateId = $Request.Query.TemplateId
-                $filter = "PartitionKey eq 'Templates' and RowKey eq '$templateId'"
+                $filter = "PartitionKey eq 'Templates' and RowKey eq '$(ConvertTo-CIPPODataFilterValue -Value $templateId)'"
             }
 
             $Body = Get-CIPPAzDataTableEntity @Table -Filter $filter | ForEach-Object {
@@ -88,7 +92,7 @@ function Invoke-ExecAppPermissionTemplate {
     }
 
     return ([HttpResponseContext]@{
-            StatusCode = [HttpStatusCode]::OK
+            StatusCode = $StatusCode
             Body       = ConvertTo-Json -Depth 10 -InputObject @($Body)
         })
 

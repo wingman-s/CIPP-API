@@ -32,14 +32,14 @@ function Get-CIPPAlertRoleEscalableGroups {
             $groupById["$($g.id)"] = $g
         }
 
-        $roleDefinitions = @(New-GraphGetRequest -uri "https://graph.microsoft.com/beta/roleManagement/directory/roleDefinitions?`$select=id,displayName&`$top=999" -tenantid $TenantFilter)
+        $roleDefinitions = @(New-GraphGetRequest -uri "https://graph.microsoft.com/beta/roleManagement/directory/roleDefinitions?`$select=id,displayName" -tenantid $TenantFilter)
         $roleDefById = @{}
         foreach ($rd in $roleDefinitions) {
             if (-not $rd.id) { continue }
             $roleDefById["$($rd.id)"] = $rd
         }
 
-        $roleAssignments = @(New-GraphGetRequest -uri "https://graph.microsoft.com/beta/roleManagement/directory/roleAssignments?`$select=id,principalId,roleDefinitionId,directoryScopeId,appScopeId&`$top=999" -tenantid $TenantFilter)
+        $roleAssignments = @(New-GraphGetRequest -uri "https://graph.microsoft.com/beta/roleManagement/directory/roleAssignments?`$select=id,principalId,roleDefinitionId,directoryScopeId,appScopeId" -tenantid $TenantFilter)
         if (-not $roleAssignments -or $roleAssignments.Count -eq 0) {
             Write-Information "Get-CIPPAlertRoleEscalableGroups: no role assignments returned for $TenantFilter"
             return
@@ -118,7 +118,7 @@ function Get-CIPPAlertRoleEscalableGroups {
         }
 
         if ($findings.Count -eq 0) {
-            Write-LogMessage -API 'Alerts' -tenant $TenantFilter -message "Role-escalable groups alert: no role-escalation group paths found" -sev 'Information'
+            Write-LogMessage -API 'Alerts' -tenant $TenantFilter -message "Role-escalable groups alert: no role-escalation group paths found" -sev 'Info'
         }
         Write-AlertTrace -cmdletName $MyInvocation.MyCommand -tenantFilter $TenantFilter -data @($findings)
     } catch {

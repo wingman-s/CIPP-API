@@ -16,6 +16,14 @@ function Invoke-ExecAppApprovalTemplate {
     $User = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Headers.'x-ms-client-principal')) | ConvertFrom-Json
 
     $Action = $Request.Query.Action ?? $Request.Body.Action
+    $CanWrite = switch ($Action) {
+        'Save' { Test-CippTemplateWriteAccess -PartitionKey 'AppApprovalTemplate' -RowKey $Request.Body.TemplateId }
+        'Delete' { Test-CippTemplateWriteAccess }
+        default { $true }
+    }
+    if (-not $CanWrite) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::Forbidden; Body = @{ Results = 'Roles limited to specific tenants cannot change or remove shared templates.' } })
+    }
     $StatusCode = [HttpStatusCode]::OK
 
     switch ($Action) {
@@ -77,6 +85,7 @@ function Invoke-ExecAppApprovalTemplate {
                     'Results' = $_.Exception.Message
                 }
                 Write-LogMessage -headers $Headers -API $APIName -message "App Deployment Template Save failed: $($_.Exception.Message)" -Sev 'Error'
+                $StatusCode = [HttpStatusCode]::InternalServerError
             }
         }
         'Delete' {
@@ -84,7 +93,7 @@ function Invoke-ExecAppApprovalTemplate {
                 $TemplateId = $Request.Body.TemplateId
 
                 # Get the template to delete
-                $Template = Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq 'AppApprovalTemplate' and RowKey eq '$TemplateId'"
+                $Template = Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq 'AppApprovalTemplate' and RowKey eq '$(ConvertTo-CIPPODataFilterValue -Value $TemplateId)'"
 
                 if ($Template) {
                     $TemplateData = $Template.JSON | ConvertFrom-Json
@@ -101,12 +110,14 @@ function Invoke-ExecAppApprovalTemplate {
                     $Body = @{
                         'Results' = 'No template found with the provided ID'
                     }
+                    $StatusCode = [HttpStatusCode]::NotFound
                 }
             } catch {
                 $Body = @{
                     'Results' = "Failed to delete template: $($_.Exception.Message)"
                 }
                 Write-LogMessage -headers $Headers -API $APIName -message "App Deployment Template Delete failed: $($_.Exception.Message)" -Sev 'Error'
+                $StatusCode = [HttpStatusCode]::InternalServerError
             }
         }
         'Get' {
@@ -114,7 +125,7 @@ function Invoke-ExecAppApprovalTemplate {
             $filter = "PartitionKey eq 'AppApprovalTemplate'"
             if ($Request.Query.TemplateId) {
                 $templateId = $Request.Query.TemplateId
-                $filter = "PartitionKey eq 'AppApprovalTemplate' and RowKey eq '$templateId'"
+                $filter = "PartitionKey eq 'AppApprovalTemplate' and RowKey eq '$(ConvertTo-CIPPODataFilterValue -Value $templateId)'"
             }
 
             $Templates = Get-CIPPAzDataTableEntity @Table -Filter $filter

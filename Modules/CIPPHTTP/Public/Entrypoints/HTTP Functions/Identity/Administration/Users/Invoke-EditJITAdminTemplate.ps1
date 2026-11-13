@@ -19,12 +19,15 @@ function Invoke-EditJITAdminTemplate {
 
         # Validate required fields
         if ([string]::IsNullOrWhiteSpace($GUID)) {
+            $FailCode = [HttpStatusCode]::BadRequest
             throw 'GUID is required'
         }
         if ([string]::IsNullOrWhiteSpace($TenantFilter)) {
+            $FailCode = [HttpStatusCode]::BadRequest
             throw 'tenantFilter is required'
         }
         if ([string]::IsNullOrWhiteSpace($TemplateName)) {
+            $FailCode = [HttpStatusCode]::BadRequest
             throw 'templateName is required'
         }
 
@@ -35,16 +38,23 @@ function Invoke-EditJITAdminTemplate {
 
         # Get the existing template
         $Table = Get-CippTable -tablename 'templates'
-        $SafeGUID = ConvertTo-CIPPODataFilterValue -Value $GUID -Type Guid
+        $SafeGUID = try { ConvertTo-CIPPODataFilterValue -Value $GUID -Type Guid } catch { $FailCode = [HttpStatusCode]::BadRequest; throw }
         $Filter = "PartitionKey eq 'JITAdminTemplate' and RowKey eq '$SafeGUID'"
         $ExistingTemplate = Get-CIPPAzDataTableEntity @Table -Filter $Filter
 
         if (!$ExistingTemplate) {
+            $FailCode = [HttpStatusCode]::NotFound
             throw "Template with GUID '$GUID' not found"
         }
 
         # Parse existing template data
         $ExistingData = $ExistingTemplate.JSON | ConvertFrom-Json -Depth 100
+        if (-not ($ExistingData | Select-CippAllowedTenantData -TenantProperty 'tenantFilter')) {
+            return ([HttpResponseContext]@{
+                    StatusCode = [HttpStatusCode]::Forbidden
+                    Body       = @{ Results = "This template is for $($ExistingData.tenantFilter -eq 'AllTenants' ? 'all tenants' : $ExistingData.tenantFilter), which is outside your access." }
+                })
+        }
 
         # Check if template name is unique (excluding current template)
         $AllTemplates = Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq 'JITAdminTemplate'"
@@ -58,6 +68,7 @@ function Invoke-EditJITAdminTemplate {
         }
 
         if ($DuplicateName) {
+            $FailCode = [HttpStatusCode]::BadRequest
             throw "A template with name '$TemplateName' already exists for tenant '$TenantFilter'"
         }
 
@@ -85,6 +96,7 @@ function Invoke-EditJITAdminTemplate {
         # Validate user action fields
         $DefaultUserAction = $Request.Body.defaultUserAction
         if ($TenantFilter -eq 'AllTenants' -and $DefaultUserAction -eq 'select') {
+            $FailCode = [HttpStatusCode]::BadRequest
             throw 'defaultUserAction cannot be "select" when tenantFilter is "AllTenants"'
         }
 
@@ -169,7 +181,7 @@ function Invoke-EditJITAdminTemplate {
         $ErrorMessage = Get-CippException -Exception $_
         $Result = "Failed to update JIT Admin Template: $($ErrorMessage.NormalizedError)"
         Write-LogMessage -headers $Headers -API $APIName -message $Result -Sev 'Error' -LogData $ErrorMessage
-        $StatusCode = [HttpStatusCode]::InternalServerError
+        $StatusCode = $FailCode ?? [HttpStatusCode]::InternalServerError
     }
 
     return ([HttpResponseContext]@{

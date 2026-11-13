@@ -118,6 +118,31 @@ function Invoke-CIPPOffboardingJob {
                 }
             }
             @{
+                Title      = 'Remove group ownership'
+                Condition  = { $Options.RemoveGroupOwnership -eq $true }
+                Cmdlet     = 'Remove-CIPPGroupOwnerships'
+                Parameters = @{
+                    userid       = $UserID
+                    tenantFilter = $TenantFilter
+                    APIName      = $APIName
+                    Username     = $Username
+                    NewOwner     = [string]($Options.NewGroupOwner.value ?? $Options.NewGroupOwner)
+                    Headers      = $Headers
+                }
+            }
+            @{
+                Title      = 'Remove all admin roles'
+                Condition  = { $Options.RemoveRoles -eq $true }
+                Cmdlet     = 'Remove-CIPPUserRoles'
+                Parameters = @{
+                    UserID       = $UserID
+                    Username     = $Username
+                    TenantFilter = $TenantFilter
+                    APIName      = $APIName
+                    Headers      = $Headers
+                }
+            }
+            @{
                 Title      = 'Remove all rules'
                 Condition  = { $Options.RemoveRules -eq $true }
                 Cmdlet     = 'Remove-CIPPMailboxRule'
@@ -176,7 +201,7 @@ function Invoke-CIPPOffboardingJob {
                     userid       = $UserID
                     username     = $Username
                     tenantFilter = $TenantFilter
-                    Forward      = $Options.forward.value
+                    Forward      = [string]($Options.forward.value ?? $Options.forward)
                     KeepCopy     = [bool]$Options.KeepCopy
                     APIName      = $APIName
                     Headers      = $Headers
@@ -427,7 +452,7 @@ function Invoke-CIPPOffboardingJob {
                     $null = New-CIPPAsyncDeployment -JobId $DeploymentId -Names @($Username) -StepTitles (@($Batch | ForEach-Object { $_.Title }) + $NotifySteps) -Source 'Offboarding' -TaskId $TaskInfo.RowKey -TenantFilter $TenantFilter
                 } catch {
                     # Progress is a nice-to-have: a storage hiccup here must not fail the offboarding itself.
-                    Write-LogMessage -API $APIName -tenant $TenantFilter -message "Could not write the progress row for $Username : $($_.Exception.Message)" -sev Warn
+                    Write-LogMessage -API $APIName -tenant $TenantFilter -message "Could not write the progress row for $Username : $($_.Exception.Message)" -sev Warning
                 }
             }
             for ($i = 0; $i -lt $Batch.Count; $i++) {

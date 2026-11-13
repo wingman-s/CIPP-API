@@ -1,7 +1,7 @@
 function Invoke-ListMailQuarantine {
     <#
     .FUNCTIONALITY
-        Entrypoint
+        Entrypoint,TenantGroup
     .ROLE
         Exchange.SpamFilter.Read
     .DESCRIPTION
@@ -99,7 +99,7 @@ function Invoke-ListMailQuarantine {
         $StatusCode = [HttpStatusCode]::OK
     } catch {
         $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-        $StatusCode = [HttpStatusCode]::Forbidden
+        $StatusCode = [HttpStatusCode]::InternalServerError
         $GraphRequest = $ErrorMessage
     }
 

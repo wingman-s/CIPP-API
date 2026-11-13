@@ -1,0 +1,83 @@
+# Pester tests for Invoke-ExecIncidentsList reading AllTenants through the graph request cache
+
+BeforeAll {
+    $RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
+    $IncidentsPath = Join-Path $RepoRoot 'Modules/CIPPHTTP/Public/Entrypoints/HTTP Functions/Security/Incidents'
+
+    ([PSObject].Assembly.GetType('System.Management.Automation.TypeAccelerators')).GetMethod('Add').Invoke(
+        $null, @('HttpStatusCode', [System.Net.HttpStatusCode]))
+
+    class HttpResponseContext {
+        [int]$StatusCode
+        [object]$Body
+    }
+
+    function New-GraphGetRequest { param($uri, $tenantid, $AsApp) }
+    function Get-GraphRequestList { param($TenantFilter, $Endpoint, $Parameters, $AsApp, $CacheStatus) }
+    function Get-NormalizedError { param($Message) $Message }
+
+    . (Join-Path $IncidentsPath 'Invoke-ExecIncidentsList.ps1')
+}
+
+Describe 'Invoke-ExecIncidentsList for AllTenants' {
+    BeforeAll {
+        Mock Get-GraphRequestList {
+            [pscustomobject]@{ id = '1'; displayName = 'Old'; createdDateTime = '2026-09-01T10:00:00Z'; Tenant = 'a.com' }
+            [pscustomobject]@{ id = '2'; displayName = 'In range'; createdDateTime = '2026-10-02T10:00:00Z'; Tenant = 'b.com' }
+            [pscustomobject]@{ Tenant = 'c.com'; CippStatus = 'Could not connect to tenant.' }
+        }
+    }
+
+    It 'reads incidents as the app and keeps only those in the date range' {
+        $request = [pscustomobject]@{ Query = [pscustomobject]@{ tenantFilter = 'AllTenants'; StartDate = '20261001'; EndDate = '20261002' } }
+
+        $response = Invoke-ExecIncidentsList -Request $request -TriggerMetadata $null
+
+        Should -Invoke Get-GraphRequestList -Times 1 -Exactly -ParameterFilter { $Endpoint -eq 'security/incidents' -and $AsApp -eq $true }
+        $response.StatusCode | Should -Be 200
+        @($response.Body.Results).ForEach({ "$($_.Tenant)/$($_.DisplayName)" }) | Should -Be 'b.com/In range'
+    }
+}
+
+Describe 'Invoke-ExecIncidentsList tags' {
+    It 'joins custom and system tags' {
+        Mock New-GraphGetRequest {
+            [pscustomobject]@{ id = '3'; createdDateTime = [datetime]'2026-10-03T10:00:00Z'; customTags = @('VIP'); systemTags = @('Credential Phish') }
+            [pscustomobject]@{ id = '2'; createdDateTime = [datetime]'2026-10-02T10:00:00Z'; customTags = @(); systemTags = @('Credential Phish') }
+            [pscustomobject]@{ id = '1'; createdDateTime = [datetime]'2026-10-01T10:00:00Z'; customTags = @(); systemTags = @() }
+        }
+        $request = [pscustomobject]@{ Query = [pscustomobject]@{ tenantFilter = 'a.com' } }
+
+        $response = Invoke-ExecIncidentsList -Request $request -TriggerMetadata $null
+
+        @($response.Body.Results).ForEach({ $_.Tags }) | Should -Be @('VIP, Credential Phish', 'Credential Phish', '')
+    }
+}
+
+Describe 'Invoke-ExecIncidentsList order' {
+    It 'lists the newest incident first' {
+        Mock New-GraphGetRequest {
+            [pscustomobject]@{ id = '999'; createdDateTime = [datetime]'2026-06-10T10:00:00Z' }
+            [pscustomobject]@{ id = '1508'; createdDateTime = [datetime]'2026-11-07T10:00:00Z' }
+            [pscustomobject]@{ id = '1000'; createdDateTime = [datetime]'2026-06-11T10:00:00Z' }
+        }
+        $request = [pscustomobject]@{ Query = [pscustomobject]@{ tenantFilter = 'a.com' } }
+
+        $response = Invoke-ExecIncidentsList -Request $request -TriggerMetadata $null
+
+        @($response.Body.Results).ForEach({ $_.Id }) | Should -Be @('1508', '1000', '999')
+    }
+
+    It 'lists the newest incident first across tenants' {
+        Mock Get-GraphRequestList {
+            [pscustomobject]@{ id = '120'; Tenant = 'a.com'; createdDateTime = [datetime]'2026-11-07T10:00:00Z' }
+            [pscustomobject]@{ id = '7'; Tenant = 'b.com'; createdDateTime = [datetime]'2026-11-08T10:00:00Z' }
+            [pscustomobject]@{ id = '1500'; Tenant = 'c.com'; createdDateTime = [datetime]'2026-11-06T10:00:00Z' }
+        }
+        $request = [pscustomobject]@{ Query = [pscustomobject]@{ tenantFilter = 'AllTenants' } }
+
+        $response = Invoke-ExecIncidentsList -Request $request -TriggerMetadata $null
+
+        @($response.Body.Results).ForEach({ $_.Tenant }) | Should -Be @('b.com', 'a.com', 'c.com')
+    }
+}

@@ -6,6 +6,12 @@ function Invoke-CippTestZTNA21877 {
     param($Tenant)
     #Tested
     try {
+        $Users = Get-CIPPTestData -TenantFilter $Tenant -Type 'Users'
+        if ($Users -and -not $Users.Where({ $_.userType -eq 'Guest' }, 'First')) {
+            Add-CippTestResult -TenantFilter $Tenant -TestId 'ZTNA21877' -TestType 'Identity' -Status 'Passed' -ResultMarkdown 'No guest accounts found in the tenant' -Risk 'Medium' -Name 'All guests have a sponsor' -UserImpact 'Medium' -ImplementationEffort 'Medium' -Category 'Application management'
+            return
+        }
+
         $Guests = Get-CIPPTestData -TenantFilter $Tenant -Type 'Guests'
         if (-not $Guests) {
             Add-CippTestResult -TenantFilter $Tenant -TestId 'ZTNA21877' -TestType 'Identity' -Status 'Skipped' -ResultMarkdown 'No data found in database. This may be due to missing required licenses or data collection not yet completed.' -Risk 'Medium' -Name 'All guests have a sponsor' -UserImpact 'Medium' -ImplementationEffort 'Medium' -Category 'Application management'
@@ -17,7 +23,7 @@ function Invoke-CippTestZTNA21877 {
             return
         }
 
-        $GuestsWithoutSponsors = $Guests | Where-Object { -not $_.sponsors -or $_.sponsors.Count -eq 0 }
+        $GuestsWithoutSponsors = $Guests.Where({ -not $_.sponsors -or $_.sponsors.Count -eq 0 })
 
         if ($GuestsWithoutSponsors.Count -eq 0) {
             $Status = 'Passed'
@@ -34,7 +40,7 @@ function Invoke-CippTestZTNA21877 {
             $ResultLines.Add('')
             $ResultLines.Add('**Top 10 guests without sponsors:**')
 
-            $Top10Guests = $GuestsWithoutSponsors | Select-Object -First 10
+            $Top10Guests = $GuestsWithoutSponsors.Where({ $true }, 'First', 10)
             foreach ($Guest in $Top10Guests) {
                 $ResultLines.Add("- $($Guest.displayName) ($($Guest.userPrincipalName))")
             }

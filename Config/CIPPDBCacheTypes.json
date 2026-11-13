@@ -55,11 +55,6 @@
     "description": "Authentication methods policy configuration"
   },
   {
-    "type": "DeviceSettings",
-    "friendlyName": "Device Settings",
-    "description": "Device management settings"
-  },
-  {
     "type": "DirectoryRecommendations",
     "friendlyName": "Directory Recommendations",
     "description": "Azure AD directory recommendations"
@@ -105,6 +100,12 @@
     "description": "Microsoft Secure Score and control profiles"
   },
   {
+    "type": "SecureScoreSummary",
+    "collectedBy": "SecureScore",
+    "friendlyName": "Secure Score Summary",
+    "description": "Compact per-tenant secure score, history and per-control results used by the All Tenants secure score views"
+  },
+  {
     "type": "PIMSettings",
     "friendlyName": "PIM Settings",
     "description": "Privileged Identity Management settings and assignments"
@@ -118,6 +119,11 @@
     "type": "RoleEligibilitySchedules",
     "friendlyName": "Role Eligibility Schedules",
     "description": "PIM role eligibility schedules"
+  },
+  {
+    "type": "PIMGroupEligibilitySchedules",
+    "friendlyName": "PIM for Groups Eligibility",
+    "description": "Who is eligible for membership or ownership of role-assignable groups through PIM for Groups, with the users inside eligible groups"
   },
   {
     "type": "RoleManagementPolicies",
@@ -163,6 +169,36 @@
     "type": "UserRegistrationDetails",
     "friendlyName": "User Registration Details",
     "description": "MFA registration details for users"
+  },
+  {
+    "type": "ServicePrincipalSignInActivities",
+    "friendlyName": "Service Principal Sign-In Activity",
+    "description": "Last sign-in of every app, delegated or app-only (Entra ID P1)"
+  },
+  {
+    "type": "AppCredentialSignInActivities",
+    "friendlyName": "App Credential Sign-In Activity",
+    "description": "Last sign-in of every app secret and certificate that signed in (Entra ID P1)"
+  },
+  {
+    "type": "AppFederatedCredentials",
+    "friendlyName": "App Federated Credentials",
+    "description": "Federated identity credentials on app registrations: the issuer and subject whose tokens sign in as the app"
+  },
+  {
+    "type": "AppCredentialChanges",
+    "friendlyName": "App Credential Changes",
+    "description": "Secrets and certificates added to apps in the last 30 days and who added them (Entra ID P1)"
+  },
+  {
+    "type": "ServicePrincipalRoleChanges",
+    "friendlyName": "Service Principal Role Changes",
+    "description": "Directory roles and group memberships given to apps in the last 30 days and who gave them (Entra ID P1)"
+  },
+  {
+    "type": "DelegatedGrantChanges",
+    "friendlyName": "Delegated Grant Changes",
+    "description": "Delegated permission grants added in the last 30 days and who added them, a user or an app (Entra ID P1)"
   },
   {
     "type": "OAuth2PermissionGrants",
@@ -233,6 +269,16 @@
     "type": "ExoAcceptedDomains",
     "friendlyName": "Exchange Accepted Domains",
     "description": "Exchange Online accepted domains"
+  },
+  {
+    "type": "ExoApplicationAccessPolicies",
+    "friendlyName": "Exchange Application Access Policies",
+    "description": "Exchange application access policies: the app, RestrictAccess or DenyAccess, the group it applies to and whether it is valid"
+  },
+  {
+    "type": "ExoAppRoleAssignments",
+    "friendlyName": "Exchange Application Role Assignments",
+    "description": "Exchange RBAC for Applications role assignments: the app, the Application role, its management scope or administrative unit and when it was created"
   },
   {
     "type": "ExoHostedContentFilterPolicy",
@@ -315,6 +361,11 @@
     "description": "Mailboxes with SMTP AUTH explicitly enabled despite the tenant default"
   },
   {
+    "type": "MailboxMessageConfiguration",
+    "friendlyName": "Mailbox Message Configuration",
+    "description": "Default compose font name, size and colour of every user and shared mailbox (collected on demand)"
+  },
+  {
     "type": "MailboxUsage",
     "friendlyName": "Mailbox Usage",
     "description": "Exchange Online mailbox usage statistics"
@@ -339,6 +390,16 @@
     "type": "OneDriveLongPaths",
     "friendlyName": "OneDrive Long Paths",
     "description": "Per-user counts of OneDrive paths that may exceed Windows 260-character sync limits or the cloud 400-character ceiling (no file or folder names stored)"
+  },
+  {
+    "type": "OneDriveQuotas",
+    "friendlyName": "OneDrive Quotas",
+    "description": "OneDrive storage quota per enabled licensed user, collected on demand for the OneDrive licensed quota baseline"
+  },
+  {
+    "type": "OneDriveRootShortcuts",
+    "friendlyName": "OneDrive Root Shortcuts",
+    "description": "SharePoint library shortcuts still in each enabled member's OneDrive root (summary row of users and shortcuts to move); collected on demand by the MigrateOneDriveShortcuts baseline"
   },
   {
     "type": "SharePointSiteListing",
@@ -489,7 +550,7 @@
   {
     "type": "SPOSites",
     "friendlyName": "SharePoint Site Settings",
-    "description": "Per-site SharePoint admin settings (site owner, sharing controls, lifecycle, version policy, People Picker, unmanaged-device access) for every site collection, keyed by site id"
+    "description": "Per-site SharePoint settings (URL, title, template, guest People Picker suggestions) for every site collection, keyed by site id"
   },
   {
     "type": "PeopleInsights",
@@ -633,6 +694,11 @@
     "description": "Exchange Online Message Encryption (OME) branding configurations"
   },
   {
+    "type": "ExoIRMConfiguration",
+    "friendlyName": "Exchange IRM Configuration",
+    "description": "Exchange Online IRM configuration including Azure RMS licensing and simplified client access"
+  },
+  {
     "type": "ExoMailboxPlans",
     "friendlyName": "Exchange Mailbox Plans",
     "description": "Mailbox plans with recipient limits and send/receive sizes normalized to MB"
@@ -701,6 +767,12 @@
     "description": "Microsoft Purview sensitivity labels from the Security & Compliance endpoint"
   },
   {
+    "type": "ExoLabelPolicies",
+    "collectedBy": "ExoLabels",
+    "friendlyName": "Compliance Sensitivity Label Policies",
+    "description": "Microsoft Purview sensitivity label policies from the Security & Compliance endpoint"
+  },
+  {
     "type": "DlpComplianceRules",
     "collectedBy": "DlpCompliancePolicies",
     "friendlyName": "DLP Compliance Rules",
@@ -733,8 +805,23 @@
     "description": "Refreshes every cache type that feeds the group usage report (groups, Conditional Access, Intune, roles, app assignments, licenses, transport rules); writes no rows of its own"
   },
   {
+    "type": "NetworkAccess",
+    "friendlyName": "Global Secure Access",
+    "description": "Global Secure Access onboarding status, traffic forwarding profiles with their policy groups and assignment, and Conditional Access signaling"
+  },
+  {
+    "type": "NetworkAccessFiltering",
+    "friendlyName": "Global Secure Access Filtering",
+    "description": "Global Secure Access web content filtering profiles with their policy links and Conditional Access policies, and filtering policies with their rules"
+  },
+  {
     "type": "RolesAndAssignments",
     "friendlyName": "Roles & Assignments Sources",
     "description": "Refreshes every cache type that feeds the Roles & Assignments page (directory roles, role definitions, role assignments, administrative units, PIM schedules and policies); writes no rows of its own"
+  },
+  {
+    "type": "PlannerUserPolicies",
+    "friendlyName": "Planner User Policies",
+    "description": "Planner tenant-admin UserPolicy (block deleting tasks not created by self) for each enabled Planner-licensed member; collected on demand by the PlannerBlockTaskDelete baseline"
   }
 ]

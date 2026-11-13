@@ -18,7 +18,13 @@ function Invoke-ListGDAPServicePrincipals {
     $Filter = $null
     switch ($OwnerType) {
         'partner' {
-            $Filter = "appOwnerOrganizationId eq $($env:TenantID)"
+            # Apps owned by any configured partner tenant
+            $PartnerIds = @((Get-CIPPPartnerTenantList).partnerTenantId | Where-Object { $_ })
+            $Filter = if ($PartnerIds.Count -gt 1) {
+                'appOwnerOrganizationId in ({0})' -f ($PartnerIds -join ',')
+            } else {
+                "appOwnerOrganizationId eq $($env:TenantID)"
+            }
         }
         'vendor' {
             $VendorTenantIdsRaw = $Request.Query.vendorTenantIds ?? ''
@@ -61,7 +67,7 @@ function Invoke-ListGDAPServicePrincipals {
         $ErrorMessage = Get-CippException -Exception $_
         Write-LogMessage -API $APIName -tenant $TenantFilter -headers $Request.Headers -message "Failed to list GDAP service principals: $($ErrorMessage.NormalizedError)" -sev Error -LogData $ErrorMessage
         $Body = @{ Results = @(); Error = $ErrorMessage.NormalizedError }
-        $StatusCode = [HttpStatusCode]::BadRequest
+        $StatusCode = [HttpStatusCode]::InternalServerError
     }
 
     return ([HttpResponseContext]@{

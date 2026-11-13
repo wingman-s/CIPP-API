@@ -50,7 +50,7 @@ Describe 'Send-CIPPScheduledTaskAlert - PSA snooze links' {
             Name              = 'Users without MFA'
             Command           = 'Get-CIPPAlertNoCAConfig'
             PostExecution     = 'psa'
-            AlertComment      = 'Please review these accounts.'
+            AlertComment      = "Please review these accounts.`nSee http://intranet/kb/42."
             PsaTicketStrategy = ''
             Parameters        = '{}'
         }
@@ -70,14 +70,15 @@ Describe 'Send-CIPPScheduledTaskAlert - PSA snooze links' {
         }
 
         Mock -CommandName Send-CIPPAlert -MockWith {
-            param($Type, $Title, $HTMLContent, $JSONContent, $TenantFilter, $AffectedUser, $PSAReference, $PSATicketId)
+            param($Type, $Title, $HTMLContent, $JSONContent, $TenantFilter, $AffectedUser, $PSAReference, $PSATicketId, $PSAConsolidationKey)
             $script:SentAlerts.Add([pscustomobject]@{
-                    Type         = $Type
-                    Title        = $Title
-                    HTMLContent  = $HTMLContent
-                    AffectedUser = $AffectedUser
-                    PSAReference = $PSAReference
-                    PSATicketId  = $PSATicketId
+                    Type                = $Type
+                    Title               = $Title
+                    HTMLContent         = $HTMLContent
+                    AffectedUser        = $AffectedUser
+                    PSAReference        = $PSAReference
+                    PSATicketId         = $PSATicketId
+                    PSAConsolidationKey = $PSAConsolidationKey
                 })
         }
     }
@@ -142,6 +143,17 @@ Describe 'Send-CIPPScheduledTaskAlert - PSA snooze links' {
             $script:SentAlerts[0].HTMLContent | Should -Match 'user1@contoso.com'
             $script:SentAlerts[0].HTMLContent | Should -Match 'user2@contoso.com'
             $script:SentAlerts[0].HTMLContent | Should -Match 'Please review these accounts\.'
+            $script:SentAlerts[0].HTMLContent | Should -Match ([regex]::Escape('accounts.<br>See <a href="http://intranet/kb/42">http://intranet/kb/42</a>.'))
+        }
+
+        It 'puts only the snooze key field in each link, not the whole item' {
+            $script:LinkTicketsToUsers = $false
+
+            Send-CIPPScheduledTaskAlert -Results $script:Results -TaskInfo $script:TaskInfo -TenantFilter 'contoso.com' -TaskType 'Alert'
+
+            $KeyOnly = [System.Web.HttpUtility]::UrlEncode('{"UserPrincipalName":"user1@contoso.com"}')
+            $script:SentAlerts[0].HTMLContent | Should -Match ([regex]::Escape("data=$KeyOnly&"))
+            $script:SentAlerts[0].HTMLContent | Should -Not -Match 'User\+One'
         }
 
         It 'honours a per-task consolidated strategy over the global toggle' {
@@ -151,6 +163,36 @@ Describe 'Send-CIPPScheduledTaskAlert - PSA snooze links' {
 
             $script:SentAlerts.Count | Should -Be 1
             $script:SentAlerts[0].HTMLContent | Should -Match 'Snooze Individual Alerts'
+        }
+    }
+
+    # Consolidation keys on the task's identity so rewording the visible title cannot fork an
+    # open ticket; the per-user split keeps one ticket per user.
+    Context 'consolidation key' {
+        It 'keys the consolidated ticket on tenant and task' {
+            $script:LinkTicketsToUsers = $false
+
+            Send-CIPPScheduledTaskAlert -Results $script:Results -TaskInfo $script:TaskInfo -TenantFilter 'contoso.com' -TaskType 'Alert'
+
+            $script:SentAlerts.Count | Should -Be 1
+            $script:SentAlerts[0].PSAConsolidationKey | Should -Be 'contoso.com|task-1'
+            $script:SentAlerts[0].Title | Should -Be 'Alert - contoso.com - Users without MFA'
+        }
+
+        It 'keys each split ticket on tenant, task and user' {
+            Send-CIPPScheduledTaskAlert -Results $script:Results -TaskInfo $script:TaskInfo -TenantFilter 'contoso.com' -TaskType 'Alert'
+
+            @($script:SentAlerts.PSAConsolidationKey) | Should -Be @('contoso.com|task-1|user1@contoso.com', 'contoso.com|task-1|user2@contoso.com')
+            @($script:SentAlerts.Title) | Should -Be @('Alert - contoso.com - Users without MFA - User One (user1@contoso.com)', 'Alert - contoso.com - Users without MFA - User Two (user2@contoso.com)')
+        }
+
+        It 'leaves the reference out of the key' {
+            $script:TaskInfo | Add-Member -NotePropertyName Reference -NotePropertyValue 'Starter Creation' -Force
+            $script:LinkTicketsToUsers = $false
+
+            Send-CIPPScheduledTaskAlert -Results $script:Results -TaskInfo $script:TaskInfo -TenantFilter 'contoso.com' -TaskType 'Alert'
+
+            $script:SentAlerts[0].PSAConsolidationKey | Should -Be 'contoso.com|task-1'
         }
     }
 

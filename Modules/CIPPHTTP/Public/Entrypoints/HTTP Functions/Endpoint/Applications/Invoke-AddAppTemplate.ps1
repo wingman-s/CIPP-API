@@ -8,6 +8,10 @@ function Invoke-AddAppTemplate {
     [CmdletBinding()]
     param($Request, $TriggerMetadata)
 
+    if (-not (Test-CippTemplateWriteAccess -PartitionKey 'AppTemplate' -RowKey $Request.Body.GUID)) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::Forbidden; Body = @{ Results = 'Roles limited to specific tenants cannot change or remove shared templates.' } })
+    }
+
     $APIName = $Request.Params.CIPPEndpoint
     $Headers = $Request.Headers
 
@@ -46,7 +50,7 @@ function Invoke-AddAppTemplate {
 
         # Upsert: if GUID provided, update existing template
         if ($Body.GUID) {
-            $Filter = "PartitionKey eq 'AppTemplate' and RowKey eq '$($Body.GUID)'"
+            $Filter = "PartitionKey eq 'AppTemplate' and RowKey eq '$(ConvertTo-CIPPODataFilterValue -Value $Body.GUID)'"
             $ExistingEntity = Get-CIPPAzDataTableEntity @Table -Filter $Filter
         }
 

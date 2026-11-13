@@ -19,14 +19,8 @@ function Invoke-CIPPStandardOauthConsent {
             "EIDSCA.AP09"
             "Essential 8 (1175)"
             "NIST CSF 2.0 (PR.AA-05)"
-            "ZTNA21772"
-            "ZTNA21774"
-            "ZTNA21807"
             "EIDSCAAP08"
-            "EIDSCAAP09"
-            "EIDSCACP01"
-            "EIDSCACP03"
-            "EIDSCACP04"
+            "ZTNA21776"
         EXECUTIVETEXT
             Requires administrative approval before employees can grant applications access to company data, preventing unauthorized data sharing and potential security breaches. This protects against malicious applications while allowing approved business tools to function normally.
         ADDEDCOMPONENT
@@ -64,7 +58,9 @@ function Invoke-CIPPStandardOauthConsent {
     } catch {
         $CompareIncludes = @()
     }
-    $StateIsCorrect = if ($State.permissionGrantPolicyIdsAssignedToDefaultUserRole -eq 'ManagePermissionGrantsForSelf.cipp-consent-policy') { $true } else { $false }
+    # The list also carries ManagePermissionGrantsForOwnedResource.* (Teams/chat RSC) entries, so only
+    # the user consent (ManagePermissionGrantsForSelf.*) entries are compared and replaced.
+    $StateIsCorrect = ((@($State.permissionGrantPolicyIdsAssignedToDefaultUserRole) -like 'ManagePermissionGrantsForSelf.*') -join ',') -eq 'ManagePermissionGrantsForSelf.cipp-consent-policy'
 
     $Standards = Get-CIPPStandards -Tenant $tenant
     $ConflictingStandard = $Standards | Where-Object -Property Standard -EQ 'OauthConsentLowSec'
@@ -120,8 +116,10 @@ function Invoke-CIPPStandardOauthConsent {
                 "Could not add exclusions, probably already exist: $($_)"
             }
 
-            if ($State.permissionGrantPolicyIdsAssignedToDefaultUserRole -notin @('ManagePermissionGrantsForSelf.cipp-consent-policy')) {
-                New-GraphPostRequest -tenantid $tenant -Uri 'https://graph.microsoft.com/beta/policies/authorizationPolicy/authorizationPolicy' -Type PATCH -Body '{"permissionGrantPolicyIdsAssignedToDefaultUserRole":["ManagePermissionGrantsForSelf.cipp-consent-policy"]}' -ContentType 'application/json'
+            if (-not $StateIsCorrect) {
+                $GrantPolicies = @($State.permissionGrantPolicyIdsAssignedToDefaultUserRole | Where-Object { $_ -and $_ -notlike 'ManagePermissionGrantsForSelf.*' }) + 'ManagePermissionGrantsForSelf.cipp-consent-policy'
+                $Body = @{ permissionGrantPolicyIdsAssignedToDefaultUserRole = @($GrantPolicies) } | ConvertTo-Json -Compress
+                New-GraphPostRequest -tenantid $tenant -Uri 'https://graph.microsoft.com/beta/policies/authorizationPolicy/authorizationPolicy' -Type PATCH -Body $Body -ContentType 'application/json'
                 $DidRemediationChange = $true
             }
 
@@ -129,7 +127,7 @@ function Invoke-CIPPStandardOauthConsent {
                 try {
                     $State = New-GraphGetRequest -Uri 'https://graph.microsoft.com/beta/policies/authorizationPolicy/authorizationPolicy' -tenantid $tenant
                     $CompareIncludes = @(New-GraphGetRequest -tenantid $tenant -Uri 'https://graph.microsoft.com/beta/policies/permissionGrantPolicies/cipp-consent-policy/includes')
-                    $StateIsCorrect = if ($State.permissionGrantPolicyIdsAssignedToDefaultUserRole -eq 'ManagePermissionGrantsForSelf.cipp-consent-policy') { $true } else { $false }
+                    $StateIsCorrect = ((@($State.permissionGrantPolicyIdsAssignedToDefaultUserRole) -like 'ManagePermissionGrantsForSelf.*') -join ',') -eq 'ManagePermissionGrantsForSelf.cipp-consent-policy'
                 } catch {
                     Write-LogMessage -API 'Standards' -tenant $tenant -message 'Unable to refresh OauthConsent state/includes after remediation.' -sev Warning
                 }
@@ -220,11 +218,12 @@ function Invoke-CIPPStandardOauthConsent {
             }
         }
 
-        $StateIsCorrect = ($State.permissionGrantPolicyIdsAssignedToDefaultUserRole -eq 'ManagePermissionGrantsForSelf.cipp-consent-policy') -and $IncludesAreConfigured
+        $SelfPolicies = @(@($State.permissionGrantPolicyIdsAssignedToDefaultUserRole) -like 'ManagePermissionGrantsForSelf.*')
+        $StateIsCorrect = (($SelfPolicies -join ',') -eq 'ManagePermissionGrantsForSelf.cipp-consent-policy') -and $IncludesAreConfigured
 
 
         $CurrentValue = @{
-            permissionGrantPolicyIdsAssignedToDefaultUserRole = $State.permissionGrantPolicyIdsAssignedToDefaultUserRole
+            permissionGrantPolicyIdsAssignedToDefaultUserRole = $SelfPolicies
             includes = $CurrentIncludesForCompare
         }
         # Add conflicting standard info if applicable

@@ -87,6 +87,16 @@ Describe 'Invoke-CIPPBecContainment' {
         Should -Invoke Set-CIPPBecReport -Times 1 -ParameterFilter { $CaseId -eq 'BEC-1' -and @($Properties.Containment).Count -eq 1 -and @($Properties.Containment)[0].Actions -contains 'RevokeSessions' }
     }
 
+    It 'records the protocol settings and device block list as they were before it changed them' {
+        Mock New-ExoRequest { [pscustomobject]@{ IMAPEnabled = $true; EWSEnabled = $false; ActiveSyncBlockedDeviceIDs = @('dev-old') } } -ParameterFilter { $cmdlet -eq 'Get-CASMailbox' }
+        $null = Invoke-CIPPBecContainment -TenantFilter 'contoso.com' -UserId 'u1' -UserPrincipalName 'victim@contoso.com' -Actions @('BlockProtocols', 'BlockMobileDevices') -Parameters @{ Protocols = @('IMAP', 'EWS') } -RunResults $script:Run -CaseId 'BEC-1'
+        Should -Invoke Set-CIPPBecReport -Times 1 -ParameterFilter {
+            $Before = @($Properties.Containment)[0].Before
+            $Before.BlockProtocols.IMAPEnabled -eq $true -and $Before.BlockProtocols.EWSEnabled -eq $false -and $Before.BlockProtocols.Count -eq 2 -and
+            (@($Before.BlockMobileDevices.ActiveSyncBlockedDeviceIDs) -join ',') -eq 'dev-old'
+        }
+    }
+
     It 'touches no progress row without a DeploymentId' {
         Mock Set-CIPPAsyncDeploymentStep { }
         Mock Set-CIPPAsyncDeploymentStatus { }
@@ -181,7 +191,7 @@ Describe 'Invoke-CIPPBecContainment' {
     It 'resolves the user object id when a Graph action needs it and none was supplied' {
         $null = Invoke-CIPPBecContainment -TenantFilter 'contoso.com' -UserPrincipalName 'victim@contoso.com' -Actions @('TargetedCAPolicy') -Parameters @{ CAPolicy = @{ State = 'reportOnly'; Controls = 'mfaAndCompliantDevice'; ExpiresHours = 4 } }
         Should -Invoke New-GraphGetRequest -Times 1
-        Should -Invoke New-CIPPBecTargetedCAPolicy -Times 1 -ParameterFilter { $UserId -eq 'user-guid' -and $State -eq 'enabledForReportingButNotEnabled' -and $Controls -eq 'mfaAndCompliantDevice' -and $ExpiresHours -eq 4 }
+        Should -Invoke New-CIPPBecTargetedCAPolicy -Times 1 -ParameterFilter { $UserId -eq 'user-guid' -and $State -eq 'enabledForReportingButNotEnforced' -and $Controls -eq 'mfaAndCompliantDevice' -and $ExpiresHours -eq 4 }
     }
 
     It 'disables the run''s catalog-matched applications and deletes in-window devices through the platform helpers' {
@@ -213,6 +223,15 @@ Describe 'Invoke-CIPPBecContainment' {
         $null = Invoke-CIPPBecContainment -TenantFilter 'contoso.com' -UserPrincipalName 'victim@contoso.com' -Actions @('BlockMobileDevices') -RunResults $script:Run -Parameters @{ MobileDeviceIds = @('dev-1') }
         Should -Invoke New-ExoRequest -Times 0 -ParameterFilter { $cmdlet -eq 'Get-MobileDevice' }
         Should -Invoke Set-CIPPMobileDevice -Times 1 -ParameterFilter { $Quarantine -eq 'true' -and $DeviceId -eq 'dev-1' -and $Guid -eq 'guid-1' }
+    }
+
+    It 'records a failed mobile device block as an error row and keeps going' {
+        Mock Set-CIPPMobileDevice { throw 'Failed to Block Active Sync Device for victim@contoso.com: denied' }
+        $Rows = Invoke-CIPPBecContainment -TenantFilter 'contoso.com' -UserPrincipalName 'victim@contoso.com' -Actions @('BlockMobileDevices', 'ResetPassword') -Confirmed -RunResults $script:Run -Parameters @{ MobileDeviceIds = @('dev-1') }
+        $Row = $Rows | Where-Object { $_.Target -eq 'dev-1' }
+        $Row.state | Should -Be 'error'
+        $Row.resultText | Should -Match 'Failed to Block Active Sync Device'
+        Should -Invoke Set-CIPPResetPassword -Times 1
     }
 
     It 'sets and clears the case log context' {

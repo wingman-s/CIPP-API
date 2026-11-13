@@ -1,11 +1,11 @@
 function Invoke-ListMailboxes {
     <#
     .FUNCTIONALITY
-        Entrypoint
+        Entrypoint,TenantGroup
     .ROLE
         Exchange.Mailbox.Read
     .DESCRIPTION
-        Lists Exchange Online mailboxes for a tenant. Supports UseReportDB=true query parameter to retrieve cached data from the reporting database for significantly better performance, especially when querying AllTenants. When manualPagination is also set, one page is returned per request as { Results, Metadata } with a continuation token in Metadata.nextLink.
+        Lists Exchange Online mailboxes for a tenant. Supports UseReportDB=true query parameter to retrieve cached data from the reporting database for significantly better performance, especially when querying AllTenants. AllTenants reads, and any read with manualPagination set, return one page per request as { Results, Metadata } with a continuation token in Metadata.nextLink.
     #>
     [CmdletBinding()]
     param($Request, $TriggerMetadata)
@@ -13,8 +13,8 @@ function Invoke-ListMailboxes {
     $TenantFilter = $Request.Query.tenantFilter
     # Serve from the reporting database cache instead of live Graph. Much faster, especially for AllTenants.
     $UseReportDB = $Request.Query.UseReportDB -eq $true
-    # Return one page per request as { Results, Metadata } with a continuation token in Metadata.nextLink; cached reads only.
-    $ManualPagination = $Request.Query.manualPagination -and [System.Convert]::ToBoolean($Request.Query.manualPagination)
+    # Return one page per request as { Results, Metadata } with a continuation token in Metadata.nextLink; cached reads only. Always on for AllTenants.
+    $ManualPagination = ($Request.Query.manualPagination -and [System.Convert]::ToBoolean($Request.Query.manualPagination)) -or $TenantFilter -eq 'AllTenants'
     try {
         # If UseReportDB is specified, retrieve from report database
         if ($UseReportDB) {
@@ -59,7 +59,7 @@ function Invoke-ListMailboxes {
         if ($Minimal) {
             $Select = 'id,UserPrincipalName,DisplayName,PrimarySMTPAddress'
         } else {
-            $Select = 'id,ExchangeGuid,ArchiveGuid,UserPrincipalName,DisplayName,PrimarySMTPAddress,RecipientType,RecipientTypeDetails,EmailAddresses,WhenSoftDeleted,IsInactiveMailbox,ForwardingSmtpAddress,DeliverToMailboxAndForward,ForwardingAddress,HiddenFromAddressListsEnabled,ExternalDirectoryObjectId,IsDirSynced,MessageCopyForSendOnBehalfEnabled,MessageCopyForSentAsEnabled,PersistedCapabilities,LitigationHoldEnabled,LitigationHoldDate,LitigationHoldDuration,ComplianceTagHoldApplied,RetentionHoldEnabled,InPlaceHolds,RetentionPolicy,AutoExpandingArchiveEnabled'
+            $Select = 'id,ExchangeGuid,ArchiveGuid,UserPrincipalName,DisplayName,PrimarySMTPAddress,RecipientType,RecipientTypeDetails,EmailAddresses,WhenSoftDeleted,IsInactiveMailbox,ForwardingSmtpAddress,DeliverToMailboxAndForward,ForwardingAddress,HiddenFromAddressListsEnabled,ExternalDirectoryObjectId,IsDirSynced,IsExchangeCloudManaged,MessageCopyForSendOnBehalfEnabled,MessageCopyForSentAsEnabled,PersistedCapabilities,LitigationHoldEnabled,LitigationHoldDate,LitigationHoldDuration,ComplianceTagHoldApplied,RetentionHoldEnabled,InPlaceHolds,RetentionPolicy,AutoExpandingArchiveEnabled'
         }
         $ExoRequest = @{
             tenantid  = $TenantFilter
@@ -134,6 +134,7 @@ function Invoke-ListMailboxes {
             HiddenFromAddressListsEnabled,
             ExternalDirectoryObjectId,
             IsDirSynced,
+            IsExchangeCloudManaged,
             MessageCopyForSendOnBehalfEnabled,
             MessageCopyForSentAsEnabled,
             LitigationHoldEnabled,
@@ -150,7 +151,7 @@ function Invoke-ListMailboxes {
         $StatusCode = [HttpStatusCode]::OK
     } catch {
         $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-        $StatusCode = [HttpStatusCode]::Forbidden
+        $StatusCode = [HttpStatusCode]::InternalServerError
         $GraphRequest = $ErrorMessage
     }
     return ([HttpResponseContext]@{

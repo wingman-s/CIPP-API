@@ -5,7 +5,9 @@
   "tag": [
     "SMB1001 (2.5)",
     "SMB1001 (2.6)",
-    "SMB1001 (2.9)"
+    "SMB1001 (2.9)",
+    "CMMC (IA.L2-3.5.3)",
+    "NIST SP 800-171 (3.5.3)"
   ],
   "impact": "Low Impact",
   "helpText": "Enables the HardwareOath authenticationMethod for the tenant. This allows you to use hardware tokens for generating 6 digit MFA codes.",
@@ -14,11 +16,7 @@
   "impactColour": "info",
   "addedDate": "2023-12-18",
   "powershellEquivalent": "Update-MgBetaPolicyAuthenticationMethodPolicyAuthenticationMethodConfiguration",
-  "appliesToTest": [
-    "SMB1001_2_5",
-    "SMB1001_2_6",
-    "SMB1001_2_9"
-  ],
+  "appliesToTest": [],
   "recommendedBy": [],
   "requiredCapabilities": [],
   "secureScoreImpact": 0,

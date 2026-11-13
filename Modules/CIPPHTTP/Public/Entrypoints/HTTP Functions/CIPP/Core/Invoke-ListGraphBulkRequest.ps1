@@ -40,14 +40,21 @@ function Invoke-ListGraphBulkRequest {
             foreach ($GraphRequest in $BulkRequests) {
                 Test-CIPPGraphEndpointBlocked -Uri $GraphRequest.url -Throw
             }
-            $Body = New-GraphBulkRequest @GraphRequestParams
+        } catch {
+            return [HttpResponseContext]@{
+                StatusCode = [System.Net.HttpStatusCode]::BadRequest
+                Body       = $_.Exception.Message
+            }
+        }
+        try {
+            $Body = @(New-GraphBulkRequest @GraphRequestParams)
             $Results = @{
                 StatusCode = [System.Net.HttpStatusCode]::OK
                 Body       = $Body
             }
         } catch {
             $Results = @{
-                StatusCode = [System.Net.HttpStatusCode]::BadRequest
+                StatusCode = [System.Net.HttpStatusCode]::InternalServerError
                 Body       = $_.Exception.Message
             }
         }

@@ -16,7 +16,6 @@ function Invoke-ExecGetBecReportPdf {
     param($Request, $TriggerMetadata)
 
     $APIName = $TriggerMetadata.FunctionName
-    Write-LogMessage -Headers $Request.Headers -API $APIName -message 'Accessed this API' -Sev 'Debug'
 
     try {
         $TenantFilter = $Request.Query.tenantFilter ?? $Request.Body.tenantFilter
@@ -28,6 +27,7 @@ function Invoke-ExecGetBecReportPdf {
             'summary' { 'summary' }
             default { 'full' }
         }
+        $BrandingPresetId = [string]($Request.Query.brandingPresetId ?? $Request.Body.brandingPresetId)
         if ([string]::IsNullOrWhiteSpace($TenantFilter) -or ([string]::IsNullOrWhiteSpace($CaseId) -and [string]::IsNullOrWhiteSpace($UserId))) {
             return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = 'A tenantFilter and either a caseId or a userId are required' })
         }
@@ -66,7 +66,7 @@ function Invoke-ExecGetBecReportPdf {
         }
         $BecData | Add-Member -NotePropertyName 'Run' -NotePropertyValue $RunBlock -Force
 
-        $TenantName = Get-CippReportTenantName -TenantFilter $TenantFilter
+        $TenantName = Get-CippReportTenantName -TenantFilter $TenantFilter -BrandingPresetId $BrandingPresetId
         # The investigated user labels the cover and footer; the run stored who it was for.
         $DisplayName = @($Run.DisplayName, $Run.UserPrincipalName, $Request.Query.userDisplayName, $Request.Body.userDisplayName, $Run.UserId) |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1
@@ -76,7 +76,7 @@ function Invoke-ExecGetBecReportPdf {
 
         $Report = Build-CippBecReportTree -UserData $UserData -BecData $BecData -TenantName $TenantName -Variant $Variant
 
-        $Bytes = ConvertTo-CippReportPdf -Blocks $Report.Blocks -Variables $Report.Variables -TenantName $TenantName -TenantFilter $TenantFilter -ReportName 'BEC Analysis Report'
+        $Bytes = ConvertTo-CippReportPdf -Blocks $Report.Blocks -Variables $Report.Variables -TenantName $TenantName -TenantFilter $TenantFilter -ReportName 'BEC Analysis Report' -BrandingPresetId $BrandingPresetId
         $FileName = ("BEC_$(if ($Variant -eq 'summary') { 'Summary' } else { 'Report' })_$DisplayName" -replace '[^a-zA-Z0-9_\-]', '_') + '.pdf'
         return ([HttpResponseContext]@{
                 StatusCode  = [HttpStatusCode]::OK

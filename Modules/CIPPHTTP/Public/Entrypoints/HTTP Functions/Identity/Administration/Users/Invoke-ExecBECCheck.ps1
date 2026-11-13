@@ -7,7 +7,7 @@ function Invoke-ExecBECCheck {
     .SYNOPSIS
         Reads, polls or starts a Business Email Compromise investigation.
     .DESCRIPTION
-        GET with GUID (or caseId) returns that run: while it is queued or running { Waiting = true, Progress } where Progress is the job status (queued until a worker picks it up, then running) and the per-step state the page renders; { Error, Progress } when it failed; otherwise the results payload with the server-side Score, per-collector Completeness and a Run block. A queued or running run whose progress has not moved for 20 minutes is marked failed by this poll (the worker restarted or the run was abandoned) and returned as { Error }. GET without a GUID returns the user's latest run as { GUID, Status } and starts nothing (GUID is null when the user has no runs). POST with tenantFilter, userid and userName queues a new run and returns its { GUID }. Every run is the full investigation and is kept in the BecReports table; metadata only, never message content.
+        GET with GUID (or caseId) returns that run: while it is queued or running { Waiting = true, Progress } where Progress is the job status (queued until a worker picks it up, then running) and the per-step state the page renders; { Error, Progress } when it failed; otherwise the results payload with the server-side Score, per-collector Completeness and a Run block. GET without a GUID returns the user's latest run as { GUID, Status } and starts nothing (GUID is null when the user has no runs). POST with tenantFilter, userid and userName queues a new run and returns its { GUID }; windowDays (1-30) sets how many days of history it covers, ending now, and defaults to 7 days (30 when the user holds Entra ID P1/P2). Every run is the full investigation and is kept in the BecReports table; metadata only, never message content.
     #>
     [CmdletBinding()]
     param($Request, $TriggerMetadata)
@@ -24,12 +24,11 @@ function Invoke-ExecBECCheck {
     $UserName = [string](& $Pick $Request.Query.userName $Payload.userName)
     # The run to read; GUID keeps the original poll contract
     $CaseId = [string](& $Pick $Request.Query.GUID $Request.Query.caseId)
+    # Days of history the run covers, ending now (1-30); omitted = 7 days, or 30 when the user holds Entra ID P1/P2
+    $WindowRaw = [string](& $Pick $Request.Query.windowDays $Payload.windowDays)
+    $WindowDays = $WindowRaw -as [int]
     # A POST body with a userid starts a new run
     $Start = -not [string]::IsNullOrWhiteSpace([string]$Payload.userid)
-    # A queued/running run with no progress update for this long is abandoned: the worker restarted
-    # (Craft retries once, then gives up) or the queue lost it. One audit-log phase can take several
-    # minutes on a large tenant, so the threshold is generous.
-    $StaleMinutes = 20
 
     try {
         if (-not $TenantFilter) { throw 'tenantFilter is required' }
@@ -42,34 +41,7 @@ function Invoke-ExecBECCheck {
                 $Progress = try { @(Get-CIPPAsyncDeployment -JobId $Run.CaseId) | Select-Object -First 1 } catch { $null }
 
                 if ($Run.Status -in @('Waiting', 'Running')) {
-                    # last sign of life: the job row's last change, else when the run started or was requested
-                    $LastActivity = $null
-                    foreach ($Candidate in @($Progress.LastUpdate, $Run.StartedAt, $Run.RequestedAt)) {
-                        if ($null -eq $Candidate -or "$Candidate" -eq '') { continue }
-                        try {
-                            $LastActivity = if ($Candidate -is [DateTimeOffset]) { $Candidate.UtcDateTime } else { ([datetime]$Candidate).ToUniversalTime() }
-                            break
-                        } catch { $LastActivity = $null }
-                    }
-                    if ($LastActivity -and $LastActivity -lt (Get-Date).ToUniversalTime().AddMinutes(-$StaleMinutes)) {
-                        $StaleMessage = "No progress for more than $StaleMinutes minutes - the worker was restarted or the run was abandoned. Start a new run."
-                        try {
-                            $null = Set-CIPPBecReport -TenantFilter $TenantFilter -CaseId $Run.CaseId -Properties @{ Status = 'Error'; ErrorMessage = $StaleMessage; ExtractedAt = (Get-Date).ToUniversalTime().ToString('o') }
-                            if ($Progress) {
-                                $Steps = @($Progress.Steps)
-                                for ($i = 0; $i -lt $Steps.Count; $i++) {
-                                    if ($Steps[$i].Status -eq 'running') { Set-CIPPAsyncDeploymentStep -JobId $Run.CaseId -Name $Progress.Name -StepIndex $i -StepStatus 'failed' -Message $StaleMessage; break }
-                                }
-                                Set-CIPPAsyncDeploymentStatus -JobId $Run.CaseId -Name $Progress.Name -Status 'failed' -Logs $StaleMessage
-                                $Progress = try { @(Get-CIPPAsyncDeployment -JobId $Run.CaseId) | Select-Object -First 1 } catch { $Progress }
-                            }
-                            Write-LogMessage -headers $Headers -API $APIName -tenant $TenantFilter -message "BEC run $($Run.CaseId) marked failed: $StaleMessage" -Sev 'Warning'
-                        } catch {
-                            Write-Information "BEC: could not mark the stale run $($Run.CaseId) failed: $($_.Exception.Message)"
-                        }
-                        $Run | Add-Member -NotePropertyName 'Status' -NotePropertyValue 'Error' -Force
-                        $Run | Add-Member -NotePropertyName 'ErrorMessage' -NotePropertyValue $StaleMessage -Force
-                    }
+                    Add-CIPPRealtimeWatch -JobId $Run.CaseId
                 }
 
                 $Summary = @{
@@ -103,10 +75,11 @@ function Invoke-ExecBECCheck {
             }
         } elseif ($Start) {
             if (-not $UserId) { throw 'userid is required' }
+            if (-not [string]::IsNullOrWhiteSpace($WindowRaw) -and ($null -eq $WindowDays -or $WindowDays -lt 1 -or $WindowDays -gt 30)) { throw 'windowDays must be a whole number of days between 1 and 30' }
             $RequestedBy = try { ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Headers.'x-ms-client-principal')) | ConvertFrom-Json).userDetails } catch { 'CIPP' }
             # the technician's own address (first x-forwarded-for hop) is never the user's or the attacker's
             $RequestedFromIP = ConvertTo-CIPPBecHostAddress -Address ([string](([string]$Headers.'x-forwarded-for' -split ',')[0])).Trim()
-            $Prepared = New-CIPPBecRunRequest -TenantFilter $TenantFilter -UserId $UserId -UserPrincipalName $UserName -RequestedBy ([string]$RequestedBy) -RequestedFromIP ([string]$RequestedFromIP)
+            $Prepared = New-CIPPBecRunRequest -TenantFilter $TenantFilter -UserId $UserId -UserPrincipalName $UserName -RequestedBy ([string]$RequestedBy) -RequestedFromIP ([string]$RequestedFromIP) -WindowDays ([int]$WindowDays)
             $null = Start-CIPPOrchestrator -InputObject $Prepared.InputObject
             Write-LogMessage -headers $Headers -API $APIName -tenant $TenantFilter -message "Queued a BEC investigation for $UserName [case $($Prepared.CaseId)]" -Sev 'Info'
             $Body = @{ GUID = $Prepared.CaseId; CaseId = $Prepared.CaseId; Status = 'Waiting' }

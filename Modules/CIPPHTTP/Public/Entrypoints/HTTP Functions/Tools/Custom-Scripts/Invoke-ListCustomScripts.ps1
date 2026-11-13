@@ -21,7 +21,7 @@ function Invoke-ListCustomScripts {
 
         if ($ScriptGuid) {
             # Get specific script
-            $Filter = "PartitionKey eq 'CustomScript' and ScriptGuid eq '{0}'" -f $ScriptGuid
+            $Filter = "PartitionKey eq 'CustomScript' and ScriptGuid eq '{0}'" -f (ConvertTo-CIPPODataFilterValue -Value $ScriptGuid)
             $Scripts = Get-CIPPAzDataTableEntity @Table -Filter $Filter | Sort-Object -Property Version -Descending
 
             if ($Scripts) {
@@ -49,7 +49,7 @@ function Invoke-ListCustomScripts {
     } catch {
         $ErrorMessage = Get-CippException -Exception $_
         Write-LogMessage -API $APIName -headers $Headers -message "Failed to list custom scripts: $($ErrorMessage.NormalizedError)" -Sev 'Error' -LogData $ErrorMessage
-        $StatusCode = [HttpStatusCode]::BadRequest
+        $StatusCode = [HttpStatusCode]::InternalServerError
         $Body = @{ Error = $ErrorMessage.NormalizedError }
     }
 

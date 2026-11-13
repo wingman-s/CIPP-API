@@ -30,13 +30,13 @@ function Add-CIPPGDAPRoleTemplate {
             $ExistingRoleMappings | ForEach-Object {
                 $NewRoleMappings.Add($_)
             }
-            # Merge the new role mappings with the existing role mappings, exclude ones that have a duplicate roleDefinitionId
-            $RoleMappings | ForEach-Object {
-                if ($_.roleDefinitionId -notin $ExistingRoleMappings.roleDefinitionId) {
-                    $NewRoleMappings.Add($_)
+            # A role can be mapped to several groups, so only the same group and role pair is a duplicate
+            foreach ($Mapping in @($RoleMappings)) {
+                if (-not @($ExistingRoleMappings).Where({ $_.GroupId -eq $Mapping.GroupId -and $_.roleDefinitionId -eq $Mapping.roleDefinitionId })) {
+                    $NewRoleMappings.Add($Mapping)
                 }
             }
-            $NewRoleMappings = @($NewRoleMappings | Sort-Object -Property GroupName) | ConvertTo-Json -Compress
+            $NewRoleMappings = @($NewRoleMappings | Sort-Object -Property GroupName, GroupId, roleDefinitionId -Unique) | ConvertTo-Json -Compress
             $ExistingTemplate.RoleMappings = [string]$NewRoleMappings
             $Template = $ExistingTemplate
             Add-CIPPAzDataTableEntity @Table -Entity $Template -Force
@@ -45,7 +45,7 @@ function Add-CIPPGDAPRoleTemplate {
             $Template = [PSCustomObject]@{
                 PartitionKey = 'RoleTemplate'
                 RowKey       = $TemplateId
-                RoleMappings = [string](@($RoleMappings | Sort-Object -Property GroupName) | ConvertTo-Json -Compress)
+                RoleMappings = [string](@($RoleMappings | Sort-Object -Property GroupName, GroupId, roleDefinitionId -Unique) | ConvertTo-Json -Compress)
             }
             Add-CIPPAzDataTableEntity @Table -Entity $Template -Force
             if ($Overwrite.IsPresent) {

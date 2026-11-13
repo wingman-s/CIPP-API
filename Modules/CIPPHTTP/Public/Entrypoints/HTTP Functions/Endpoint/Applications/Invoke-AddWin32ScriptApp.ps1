@@ -37,9 +37,9 @@ function Invoke-AddWin32ScriptApp {
     # Use whichever case was provided
     $AppName = if ($Win32ScriptApp.ApplicationName) { $Win32ScriptApp.ApplicationName } else { $Win32ScriptApp.applicationName }
 
-    $AllowedTenants = Test-CIPPAccess -Request $Request -TenantList
-    $Tenants = ($Request.Body.selectedTenants | Where-Object { $AllowedTenants -contains $_.customerId -or $AllowedTenants -contains 'AllTenants' }).defaultDomainName
+    $Tenants = (Resolve-CippBulkSelectedTenant -Request $Request -SelectedTenants $Request.Body.selectedTenants).defaultDomainName
 
+    $Failed = 0
     $Results = foreach ($Tenant in $Tenants) {
         try {
             $CompleteObject = [PSCustomObject]@{
@@ -75,6 +75,7 @@ function Invoke-AddWin32ScriptApp {
             "Successfully added Win32 Script App for $($Tenant) to queue."
             Write-LogMessage -headers $Headers -API $APIName -tenant $Tenant -message "Successfully added Win32 Script App $AppName to queue" -Sev 'Info'
         } catch {
+            $Failed++
             Write-LogMessage -headers $Headers -API $APIName -tenant $Tenant -message "Failed to add Win32 Script App $AppName to queue. Error: $($_.Exception.Message)" -Sev 'Error'
             "Failed to add Win32 Script App for $($Tenant) to queue: $($_.Exception.Message)"
         }
@@ -83,7 +84,7 @@ function Invoke-AddWin32ScriptApp {
     $body = [PSCustomObject]@{ 'Results' = $Results }
 
     return ([HttpResponseContext]@{
-            StatusCode = [HttpStatusCode]::OK
+            StatusCode = Get-CippBulkStatusCode -Total @($Tenants).Count -Failed $Failed
             Body       = $body
         })
 }

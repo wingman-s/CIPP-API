@@ -19,12 +19,21 @@ function Invoke-ExecCippFunction {
         'Get-GraphTokenFromCert'
         'New-CIPPCertificateAssertion'
         'Get-ClassicAPIToken'
+        'Remove-CIPPPartnerTenant'
         'Get-CIPPSAMCertificate'
         'Get-CIPPSAMCertificateVersions'
         'New-CIPPSAMCertificate'
         'Set-CIPPSAMCertificate'
         'Update-CIPPSAMCertificate'
         'ConvertTo-CIPPSAMCertificateInfo'
+        'Update-CIPPSAMSecret'
+        'Set-CIPPSAMCredentialRecord'
+        'Get-CippKeyVaultSecret'
+        'Set-CippKeyVaultSecret'
+        'Remove-CippKeyVaultSecret'
+        'Get-CIPPAzIdentityToken'
+        'New-CIPPAzRestRequest'
+        'Invoke-CIPPRestMethod'
     )
 
     $Function = $Request.Body.FunctionName
@@ -35,7 +44,7 @@ function Invoke-ExecCippFunction {
     }
     $ParamKeys = if ($Params.Keys) { @($Params.Keys) -join ', ' } else { 'none' }
 
-    if (Get-Command -Module CIPPCore -Name $Function -and $BlockList -notcontains $Function) {
+    if ((Get-Command -Module CIPPCore -Name $Function -ErrorAction SilentlyContinue) -and ($BlockList -notcontains $Function)) {
         try {
             $Results = & $Function @Params
             if (!$Results) {

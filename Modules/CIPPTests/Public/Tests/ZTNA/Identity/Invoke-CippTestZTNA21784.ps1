@@ -9,7 +9,7 @@ function Invoke-CippTestZTNA21784 {
         $CAPolicies = Get-CIPPTestData -TenantFilter $Tenant -Type 'ConditionalAccessPolicies'
 
         if (-not $CAPolicies) {
-            Add-CippTestResult -TenantFilter $Tenant -TestId 'ZTNA21784' -TestType 'Identity' -Status 'Skipped' -ResultMarkdown 'No data found in database. This may be due to missing required licenses or data collection not yet completed.' -Risk 'Medium' -Name 'All user sign in activity uses phishing-resistant authentication methods' -UserImpact 'Low' -ImplementationEffort 'Medium' -Category 'Access Control'
+            Add-CippTestResult -TenantFilter $Tenant -TestId 'ZTNA21784' -TestType 'Identity' -Status 'Skipped' -ResultMarkdown 'No data found in database. This may be due to missing required licenses or data collection not yet completed.' -Risk 'Medium' -Name 'All user sign in activity uses phishing-resistant authentication methods' -UserImpact 'Low' -ImplementationEffort 'Medium' -Category 'Access control; Credential management'
             return
         }
 
@@ -25,33 +25,33 @@ function Invoke-CippTestZTNA21784 {
         )
 
         # Find authentication strength policies with phishing-resistant methods
-        $PhishingResistantPolicies = $AuthStrengthPolicies | Where-Object {
-            $_.allowedCombinations | Where-Object { $PhishingResistantMethods -contains $_ }
-        }
+        $PhishingResistantPolicies = $AuthStrengthPolicies.Where({
+            $_.allowedCombinations.Where({ $PhishingResistantMethods -contains $_ })
+        })
 
         if (-not $PhishingResistantPolicies) {
             $Status = 'Failed'
             $Result = 'No phishing-resistant authentication strength policies found in tenant'
-            Add-CippTestResult -TenantFilter $Tenant -TestId 'ZTNA21784' -TestType 'Identity' -Status $Status -ResultMarkdown $Result -Risk 'Medium' -Name 'All user sign in activity uses phishing-resistant authentication methods' -UserImpact 'Low' -ImplementationEffort 'Medium' -Category 'Access Control'
+            Add-CippTestResult -TenantFilter $Tenant -TestId 'ZTNA21784' -TestType 'Identity' -Status $Status -ResultMarkdown $Result -Risk 'Medium' -Name 'All user sign in activity uses phishing-resistant authentication methods' -UserImpact 'Low' -ImplementationEffort 'Medium' -Category 'Access control; Credential management'
             return
         }
 
-        $EnabledPolicies = $CAPolicies | Where-Object { $_.state -eq 'enabled' }
+        $EnabledPolicies = $CAPolicies.Where({ $_.state -eq 'enabled' })
 
         # Find policies that apply to all users with phishing-resistant auth strength
-        $RelevantPolicies = $EnabledPolicies | Where-Object {
+        $RelevantPolicies = $EnabledPolicies.Where({
             ($_.conditions.users.includeUsers -contains 'All') -and
             ($_.grantControls.authenticationStrength.id -in $PhishingResistantPolicies.id)
-        }
+        })
 
         if (-not $RelevantPolicies) {
             $Status = 'Failed'
             $Result = 'No Conditional Access policies found requiring phishing-resistant authentication for all users'
         } else {
             # Check for user exclusions that create coverage gaps
-            $PoliciesWithExclusions = $RelevantPolicies | Where-Object {
+            $PoliciesWithExclusions = $RelevantPolicies.Where({
                 $_.conditions.users.excludeUsers.Count -gt 0
-            }
+            })
 
             if ($PoliciesWithExclusions.Count -gt 0) {
                 $Status = 'Failed'
@@ -64,10 +64,10 @@ function Invoke-CippTestZTNA21784 {
             }
         }
 
-        Add-CippTestResult -TenantFilter $Tenant -TestId 'ZTNA21784' -TestType 'Identity' -Status $Status -ResultMarkdown $Result -Risk 'Medium' -Name 'All user sign in activity uses phishing-resistant authentication methods' -UserImpact 'Low' -ImplementationEffort 'Medium' -Category 'Access Control'
+        Add-CippTestResult -TenantFilter $Tenant -TestId 'ZTNA21784' -TestType 'Identity' -Status $Status -ResultMarkdown $Result -Risk 'Medium' -Name 'All user sign in activity uses phishing-resistant authentication methods' -UserImpact 'Low' -ImplementationEffort 'Medium' -Category 'Access control; Credential management'
     } catch {
         $ErrorMessage = Get-CippException -Exception $_
         Write-LogMessage -API 'Tests' -tenant $Tenant -message "Failed to run test: $($ErrorMessage.NormalizedError)" -sev Error -LogData $ErrorMessage
-        Add-CippTestResult -TenantFilter $Tenant -TestId 'ZTNA21784' -TestType 'Identity' -Status 'Failed' -ResultMarkdown "Test failed: $($ErrorMessage.NormalizedError)" -Risk 'Medium' -Name 'All user sign in activity uses phishing-resistant authentication methods' -UserImpact 'Low' -ImplementationEffort 'Medium' -Category 'Access Control'
+        Add-CippTestResult -TenantFilter $Tenant -TestId 'ZTNA21784' -TestType 'Identity' -Status 'Failed' -ResultMarkdown "Test failed: $($ErrorMessage.NormalizedError)" -Risk 'Medium' -Name 'All user sign in activity uses phishing-resistant authentication methods' -UserImpact 'Low' -ImplementationEffort 'Medium' -Category 'Access control; Credential management'
     }
 }

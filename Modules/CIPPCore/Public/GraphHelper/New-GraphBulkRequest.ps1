@@ -13,10 +13,14 @@ function New-GraphBulkRequest {
         $NoPaginateIds = @(),
         [ValidateSet('v1.0', 'beta')]
         $Version = 'beta',
-        $Headers
+        $Headers,
+        # Send up to this many $batch requests at once; 1 sends them one after another
+        [int]$MaxConcurrency = 1
     )
 
-    if ($NoAuthCheck -or (Get-AuthorisedRequest -Uri $uri -TenantID $tenantid)) {
+    # Each sub-request URL gets the same check as a single request to that URL.
+    $Refused = { -not (Get-AuthorisedRequest -Uri "https://graph.microsoft.com/$Version/$("$($_.url)".TrimStart('/'))" -TenantID $tenantid) }
+    if ($NoAuthCheck -or ((Get-AuthorisedRequest -TenantID $tenantid) -and -not @($Requests).Where($Refused, 'First'))) {
         if ($Headers) {
             $Headers = $Headers
         } else {
@@ -26,8 +30,32 @@ function New-GraphBulkRequest {
         if ($script:XMsThrottlePriority) {
             $headers['x-ms-throttle-priority'] = $script:XMsThrottlePriority
         }
+        # Entra audit logs record the $batch request's own User-Agent for every write inside it
+        if (!$headers['User-Agent']) { $headers['User-Agent'] = Get-CippUserAgent }
+        $UserAgent = $headers['User-Agent']
 
         $URL = "https://graph.microsoft.com/$Version/`$batch"
+        # a $batch lands its sub-requests at once, so the rate limiter can only space whole batches: no batch holds more
+        # sub-requests of one measured budget (CIPPRateLimiter) than its burst
+        $HasBudgets = $null -ne ('CIPP.CIPPRateLimiter' -as [type])
+        $Split = {
+            param($Items)
+            $Batches = [System.Collections.Generic.List[object]]::new()
+            $Current = [System.Collections.Generic.List[object]]::new()
+            $Used = @{}
+            foreach ($Item in @($Items)) {
+                $Budget = if ($HasBudgets) { [CIPP.CIPPRateLimiter]::BatchBudgetFor([string]$Item.url, $Version) }
+                if ($Current.Count -ge 20 -or ($Budget -and [int]$Used[$Budget.Name] -ge $Budget.Burst)) {
+                    $Batches.Add($Current.ToArray())
+                    $Current = [System.Collections.Generic.List[object]]::new()
+                    $Used = @{}
+                }
+                $Current.Add($Item)
+                if ($Budget) { $Used[$Budget.Name] = [int]$Used[$Budget.Name] + 1 }
+            }
+            if ($Current.Count -gt 0) { $Batches.Add($Current.ToArray()) }
+            , $Batches
+        }
 
         # Track consecutive Graph API failures
         $TenantsTable = Get-CippTable -tablename Tenants
@@ -41,25 +69,49 @@ function New-GraphBulkRequest {
             }
         }
         try {
-            $ReturnedData = for ($i = 0; $i -lt $Requests.count; $i += 20) {
-                $req = @{}
-                # Use select to create hashtables of id, method and url for each call
-                $req['requests'] = ($Requests[$i..($i + 19)])
-                $ReqBody = (ConvertTo-Json -InputObject $req -Compress -Depth 100)
-                $Return = Invoke-CIPPRestMethod -Uri $URL -Method POST -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $ReqBody
-                if ($Return.headers.'retry-after') {
-                    #Revist this when we are pushing this data into our custom schema instead.
-                    $headers = Get-GraphToken -tenantid $tenantid -scope $scope -AsApp $asapp
-                    Invoke-CIPPRestMethod -Uri $URL -Method POST -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $ReqBody
+            $Batches = & $Split $Requests
+            $ReturnedData = if ($MaxConcurrency -gt 1 -and $Batches.Count -gt 1) {
+                $ConcHeaders = [System.Collections.Generic.Dictionary[string, string]]::new()
+                foreach ($Key in $headers.Keys) { $ConcHeaders[$Key] = [string]$headers[$Key] }
+                $ConcRequests = [System.Collections.Generic.List[CIPP.CIPPConcurrentRequest]]::new()
+                foreach ($Batch in $Batches) {
+                    $ConcRequest = [CIPP.CIPPConcurrentRequest]::new()
+                    $ConcRequest.Uri = $URL
+                    $ConcRequest.Method = 'POST'
+                    $ConcRequest.Body = [CIPP.CippJson]::ToJson(@{ requests = $Batch }, 100) ?? (ConvertTo-Json -InputObject @{ requests = $Batch } -Compress -Depth 100)
+                    $ConcRequest.ContentType = 'application/json; charset=utf-8'
+                    $ConcRequest.Headers = $ConcHeaders
+                    $ConcRequests.Add($ConcRequest)
                 }
-                $Return
+                # SendConcurrent retries a throttled or failed batch itself; one that still fails throws, as the sequential path does
+                foreach ($ConcResult in [CIPP.CIPPRestClient]::SendConcurrent($ConcRequests, $MaxConcurrency, 3, ($PSCmdlet.PipelineStopToken ?? $global:CraftPipelineStopToken))) {
+                    if (-not $ConcResult.IsSuccess) {
+                        $Detail = if ($ConcResult.Error) { $ConcResult.Error } elseif ($ConcResult.Result.HasContent) { $ConcResult.Result.Content }
+                        throw "Graph batch request failed (HTTP $($ConcResult.StatusCode)): $Detail"
+                    }
+                    [CIPP.CippJson]::ConvertFromResponse($ConcResult.Result)
+                }
+            } else {
+                foreach ($Batch in $Batches) {
+                    $req = @{}
+                    $req['requests'] = $Batch
+                    $ReqBody = [CIPP.CippJson]::ToJson($req, 100) ?? (ConvertTo-Json -InputObject $req -Compress -Depth 100)
+                    $Return = Invoke-CIPPRestMethod -Uri $URL -Method POST -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $ReqBody
+                    if ($Return.headers.'retry-after') {
+                        #Revist this when we are pushing this data into our custom schema instead.
+                        $headers = Get-GraphToken -tenantid $tenantid -scope $scope -AsApp $asapp
+                        $headers['User-Agent'] = $UserAgent
+                        Invoke-CIPPRestMethod -Uri $URL -Method POST -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $ReqBody
+                    }
+                    $Return
+                }
             }
             # A throttled or briefly unavailable FIRST page used to come straight back as the item's failure
             # (continuation pages below are retried). Send those items again - twice, waiting the longest
             # Retry-After they asked for, up to 30 s - before a caller sees a failure.
             $TransientStatus = @(429, 503, 504)
             for ($Attempt = 1; $Attempt -le 2; $Attempt++) {
-                $Transient = @($ReturnedData.responses | Where-Object { ($_.status -as [int]) -in $TransientStatus })
+                $Transient = @(@($ReturnedData.responses).Where({ ($_.status -as [int]) -in $TransientStatus }))
                 if ($Transient.Count -eq 0) { break }
                 $Wait = 1
                 foreach ($Throttled in $Transient) {
@@ -69,8 +121,8 @@ function New-GraphBulkRequest {
                 Start-Sleep -Seconds ([Math]::Min($Wait, 30))
                 $TransientIds = @($Transient | ForEach-Object { [string]$_.id })
                 $RetryRequests = @($Requests | Where-Object { [string]$_.id -in $TransientIds })
-                for ($j = 0; $j -lt $RetryRequests.Count; $j += 20) {
-                    $RetryBody = ConvertTo-Json -InputObject @{ requests = @($RetryRequests[$j..($j + 19)]) } -Compress -Depth 100
+                foreach ($RetryBatch in (& $Split $RetryRequests)) {
+                    $RetryBody = ConvertTo-Json -InputObject @{ requests = @($RetryBatch) } -Compress -Depth 100
                     $RetryReturn = Invoke-CIPPRestMethod -Uri $URL -Method POST -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $RetryBody
                     foreach ($Fresh in @($RetryReturn.responses)) {
                         foreach ($Batch in @($ReturnedData)) {
@@ -81,7 +133,7 @@ function New-GraphBulkRequest {
                     }
                 }
             }
-            foreach ($MoreData in $ReturnedData.Responses | Where-Object { $_.body.'@odata.nextLink' }) {
+            foreach ($MoreData in @($ReturnedData.Responses).Where({ $_.body.'@odata.nextLink' })) {
                 if ($NoPaginateIds -contains $MoreData.id) {
                     continue
                 }
@@ -112,6 +164,7 @@ function New-GraphBulkRequest {
                     $NextReturn = Invoke-CIPPRestMethod -Uri $URL -Method POST -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $NextReqBody
                     if ($NextReturn.headers.'retry-after') {
                         $headers = Get-GraphToken -tenantid $tenantid -scope $scope -AsApp $asapp
+                        $headers['User-Agent'] = $UserAgent
                         $NextReturn = Invoke-CIPPRestMethod -Uri $URL -Method POST -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $NextReqBody
                     }
 
@@ -126,7 +179,7 @@ function New-GraphBulkRequest {
                         $null = $AnsweredIds.Add([string]$NextResponse.id)
                         $PageStatus = $NextResponse.status -as [int]
                         if ($PageStatus -ge 400) {
-                            $PageRequest = $NextBatchRequests | Where-Object { $_.id -eq $NextResponse.id } | Select-Object -First 1
+                            $PageRequest = $NextBatchRequests.Where({ $_.id -eq $NextResponse.id }, 'First')[0]
                             $RetryKey = "$($NextResponse.id)|$($PageRequest.url)"
                             if ($PageRequest -and $RetriedPages.Add($RetryKey)) {
                                 $RetryAfter = [Math]::Min([Math]::Max(($NextResponse.headers.'Retry-After' -as [int]), 0), 30)
@@ -200,10 +253,11 @@ function New-GraphBulkRequest {
 
         if ($Tenant.PSObject.Properties.Name -notcontains 'LastGraphError') {
             $Tenant | Add-Member -MemberType NoteProperty -Name 'LastGraphError' -Value '' -Force
-        } else {
+            Update-AzDataTableEntity -Force @TenantsTable -Entity $Tenant
+        } elseif ($Tenant.LastGraphError -ne '') {
             $Tenant.LastGraphError = ''
+            Update-AzDataTableEntity -Force @TenantsTable -Entity $Tenant
         }
-        Update-AzDataTableEntity -Force @TenantsTable -Entity $Tenant
         return $ReturnedData.responses
     } else {
         Write-Error (Get-AuthorisedRequestError -TenantID $tenantid -Context 'Graph bulk request')

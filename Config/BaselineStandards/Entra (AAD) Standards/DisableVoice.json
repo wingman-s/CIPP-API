@@ -8,7 +8,10 @@
     "NIST CSF 2.0 (PR.AA-03)",
     "SMB1001 (2.5)",
     "SMB1001 (2.6)",
-    "SMB1001 (2.9)"
+    "SMB1001 (2.9)",
+    "CMMC (IA.L2-3.5.3)",
+    "FedRAMP A-D (KSI-IAM-APM)",
+    "NIST SP 800-171 (3.5.3)"
   ],
   "impact": "High Impact",
   "helpText": "This blocks users from using Voice call as an MFA method. If a user only has Voice as a MFA method, they will be unable to log in.",
@@ -20,10 +23,7 @@
   "appliesToTest": [
     "CIS_5_2_3_5",
     "EIDSCAAV01",
-    "SMB1001_2_5",
-    "SMB1001_2_5_L4",
-    "SMB1001_2_6",
-    "SMB1001_2_9"
+    "SMB1001_2_5_L4"
   ],
   "recommendedBy": [
     "CIPP"

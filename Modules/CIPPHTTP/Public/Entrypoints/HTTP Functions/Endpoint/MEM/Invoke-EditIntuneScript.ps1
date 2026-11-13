@@ -10,7 +10,6 @@ function Invoke-EditIntuneScript {
 
     $APIName = $Request.Params.CIPPEndpoint
     $Headers = $Request.Headers
-    Write-LogMessage -Headers $Headers -API $APINAME -message 'Accessed this API' -Sev Debug
 
     $graphUrl = 'https://graph.microsoft.com/beta'
 
@@ -99,10 +98,29 @@ function Invoke-EditIntuneScript {
             }
 
             $endpoint = Get-ScriptEndpoint -ScriptType $scriptType
+            $PatchBody = $Request.Body.IntuneScript
+
+            # Script bodies are base64, so replacement runs on the decoded text rather than the JSON
+            if ($Request.Body.ReplaceVariables -eq $true) {
+                foreach ($Field in @('scriptContent', 'detectionScriptContent', 'remediationScriptContent')) {
+                    if ([string]::IsNullOrEmpty($scriptData.$Field)) { continue }
+                    try {
+                        $ScriptText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($scriptData.$Field))
+                    } catch {
+                        return ([HttpResponseContext]@{
+                                StatusCode = [HttpStatusCode]::BadRequest
+                                Body       = "$Field is not valid base64."
+                            })
+                    }
+                    $scriptData.$Field = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-CIPPTextReplacement -TenantFilter $Request.Body.TenantFilter -Text $ScriptText)))
+                }
+                $PatchBody = ConvertTo-Json -InputObject $scriptData -Depth 10 -Compress
+            }
+
             $parms = @{
                 uri      = "$graphUrl/$endpoint/$($Request.Body.ScriptId)"
                 tenantid = $Request.Body.TenantFilter
-                body     = $Request.Body.IntuneScript
+                body     = $PatchBody
             }
 
             try {
@@ -119,7 +137,7 @@ function Invoke-EditIntuneScript {
                 $Result = "Failed to update Intune $scriptType script $($Request.Body.ScriptId): $($ErrorMessage.NormalizedError)"
                 Write-LogMessage -Headers $Headers -API $APIName -tenant $Request.Body.TenantFilter -message $Result -Sev 'Error' -LogData $ErrorMessage
                 return ([HttpResponseContext]@{
-                        StatusCode = [HttpStatusCode]::BadRequest
+                        StatusCode = [HttpStatusCode]::InternalServerError
                         Body       = "Failed to update script: $($ErrorMessage.NormalizedError)"
                     })
             }

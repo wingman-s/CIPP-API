@@ -33,6 +33,7 @@ function Invoke-AddPolicy {
     $Request.Body.customGroup ? ($AssignTo = $Request.Body.customGroup) : $null
     $RawJSON = $Request.Body.RAWJson
 
+    $Failed = 0
     $Results = foreach ($Tenant in $Tenants) {
         if ($Request.Body.replacemap.$Tenant) {
             ([pscustomobject]$Request.Body.replacemap.$Tenant).PSObject.Properties | ForEach-Object { $RawJSON = $RawJSON -replace $_.name, $_.value }
@@ -48,7 +49,7 @@ function Invoke-AddPolicy {
                 # the user picked. The selected RowKey must win whenever the request carries one.
                 # String rather than Guid: built-in templates are stored with their filename as RowKey.
                 $SelectedTemplateId = ConvertTo-CIPPODataFilterValue -Value ($Request.Body.TemplateID ?? $Request.Body.TemplateId ?? $Request.Body.TemplateGuid ?? $Request.Body.TemplateGUID ?? $Request.Body.TemplateList.value) -Type String
-                $templateEntity = Get-CIPPAzDataTableEntity @templatesTable -Filter "PartitionKey eq 'IntuneTemplate' and RowKey eq '$SelectedTemplateId'" | Select-Object -First 1
+                $templateEntity = Get-CIPPAzDataTableEntity @templatesTable -Filter "PartitionKey eq 'IntuneTemplate' and RowKey eq '$(ConvertTo-CIPPODataFilterValue -Value $SelectedTemplateId)'" | Select-Object -First 1
                 if (-not $templateEntity -and $DisplayName) {
                     $templateEntity = Get-CIPPAzDataTableEntity @templatesTable -Filter "PartitionKey eq 'IntuneTemplate'" | Where-Object { ($_.JSON | ConvertFrom-Json -ErrorAction SilentlyContinue).Displayname -eq $DisplayName } | Select-Object -First 1
                 }
@@ -78,9 +79,16 @@ function Invoke-AddPolicy {
         }
 
         try {
+            # Per tenant, because the replacemap above rewrites the payload.
+            $Validation = Test-CIPPIntuneTemplate -RawJSON $RawJSON -TemplateType $Request.Body.TemplateType -DisplayName $DisplayName
+            if (-not $Validation.IsValid) {
+                throw "Not deployed to $Tenant : $($Validation.Errors -join ' ')"
+            }
+
             Write-Host 'Calling Adding policy'
             $params = @{
-                TemplateType     = $Request.Body.TemplateType
+                # Resolved type: a template stored before Type was recorded arrives with none.
+                TemplateType     = $Validation.Type
                 Description      = $description
                 DisplayName      = $DisplayName
                 RawJSON          = $RawJSON
@@ -101,13 +109,14 @@ function Invoke-AddPolicy {
 
             Set-CIPPIntunePolicy @params
         } catch {
+            $Failed++
             "$($_.Exception.Message)"
             continue
         }
     }
 
     return ([HttpResponseContext]@{
-            StatusCode = [HttpStatusCode]::OK
+            StatusCode = Get-CippBulkStatusCode -Total @($Tenants).Count -Failed $Failed
             Body       = @{'Results' = @($Results) }
         })
 }

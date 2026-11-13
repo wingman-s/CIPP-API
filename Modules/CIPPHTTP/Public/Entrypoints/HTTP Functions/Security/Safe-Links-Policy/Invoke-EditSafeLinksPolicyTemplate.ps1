@@ -10,17 +10,23 @@ function Invoke-EditSafeLinksPolicyTemplate {
     [CmdletBinding()]
     param($Request, $TriggerMetadata)
 
+    if (-not (Test-CippTemplateWriteAccess)) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::Forbidden; Body = @{ Results = 'Roles limited to specific tenants cannot change or remove shared templates.' } })
+    }
+
     $APIName = $Request.Params.CIPPEndpoint
     $Headers = $Request.Headers
-    Write-LogMessage -Headers $Headers -API $APINAME -message 'Accessed this API' -Sev Debug
+
+    $ID = $Request.Body.ID
+
+    if (-not $ID) {
+        return ([HttpResponseContext]@{
+                StatusCode = [HttpStatusCode]::BadRequest
+                Body       = [pscustomobject]@{'Results' = 'Failed to update SafeLinks policy template: Template ID is required' }
+            })
+    }
 
     try {
-        $ID = $Request.Body.ID
-
-        if (-not $ID) {
-            throw 'Template ID is required'
-        }
-
         # Check if template exists
         $Table = Get-CippTable -tablename 'templates'
         $SafeID = ConvertTo-CIPPODataFilterValue -Value $ID -Type String
@@ -28,7 +34,10 @@ function Invoke-EditSafeLinksPolicyTemplate {
         $ExistingTemplate = Get-CIPPAzDataTableEntity @Table -Filter $Filter
 
         if (-not $ExistingTemplate) {
-            throw "Template with ID '$ID' not found"
+            return ([HttpResponseContext]@{
+                    StatusCode = [HttpStatusCode]::NotFound
+                    Body       = [pscustomobject]@{'Results' = "Failed to update SafeLinks policy template: Template with ID '$ID' not found" }
+                })
         }
 
         # Create a new ordered hashtable to store selected properties
@@ -77,7 +86,7 @@ function Invoke-EditSafeLinksPolicyTemplate {
         $ErrorMessage = Get-CippException -Exception $_
         Write-LogMessage -Headers $Headers -API $APINAME -message "Failed to update SafeLinks policy template: $($ErrorMessage.NormalizedError)" -Sev Error -LogData $ErrorMessage
         $body = [pscustomobject]@{'Results' = "Failed to update SafeLinks policy template: $($ErrorMessage.NormalizedError)" }
-        $StatusCode = [HttpStatusCode]::Forbidden
+        $StatusCode = [HttpStatusCode]::InternalServerError
     }
 
     return ([HttpResponseContext]@{

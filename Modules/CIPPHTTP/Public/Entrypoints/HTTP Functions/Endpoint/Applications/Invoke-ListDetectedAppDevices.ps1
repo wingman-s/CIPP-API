@@ -16,11 +16,10 @@ function Invoke-ListDetectedAppDevices {
     # Get managed devices where a specific detected app is installed
     # Uses deviceManagement/detectedApps/{id}/managedDevices endpoint
 
+    if (-not $AppID) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ Results = 'AppID is required' } })
+    }
     try {
-        if (-not $AppID) {
-            throw "AppID parameter is required"
-        }
-
         $GraphRequest = New-GraphGetRequest -uri "https://graph.microsoft.com/beta/deviceManagement/detectedApps/$AppID/managedDevices" -Tenantid $TenantFilter
 
         # Ensure we return an array even if null
@@ -31,7 +30,7 @@ function Invoke-ListDetectedAppDevices {
         $StatusCode = [HttpStatusCode]::OK
     } catch {
         $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-        $StatusCode = [HttpStatusCode]::OK
+        $StatusCode = [HttpStatusCode]::InternalServerError
         $GraphRequest = $ErrorMessage
     }
 

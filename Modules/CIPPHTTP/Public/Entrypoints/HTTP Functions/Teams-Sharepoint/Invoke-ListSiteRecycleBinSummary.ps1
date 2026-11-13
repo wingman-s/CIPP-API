@@ -16,12 +16,17 @@ function Invoke-ListSiteRecycleBinSummary {
     $SiteUrl = $Request.Query.SiteUrl ?? $Request.Body.SiteUrl
     $MaxItems = [int]($Request.Query.MaxItems ?? $Request.Body.MaxItems ?? 5000)
     if ($MaxItems -lt 1) { $MaxItems = 5000 }
-    if ($MaxItems -gt 20000) { $MaxItems = 20000 }
+    # Offset to resume from, taken from a previous call's Metadata.nextLink; each call sums only its own items.
+    $Start = [Math]::Max(0, [int]($Request.Query.nextLink -as [int]))
+
+    if ([string]::IsNullOrWhiteSpace($TenantFilter)) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ Results = 'tenantFilter is required.' } })
+    }
+    if ([string]::IsNullOrWhiteSpace($SiteUrl)) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ Results = 'SiteUrl is required.' } })
+    }
 
     try {
-        if ([string]::IsNullOrWhiteSpace($TenantFilter)) { throw 'tenantFilter is required.' }
-        if ([string]::IsNullOrWhiteSpace($SiteUrl)) { throw 'SiteUrl is required.' }
-
         $RestContext = Resolve-CIPPSharePointRestContext -TenantFilter $TenantFilter -SiteUrl $SiteUrl
         $Scope = $RestContext.Scope
         $JsonAccept = $RestContext.Headers
@@ -33,15 +38,11 @@ function Invoke-ListSiteRecycleBinSummary {
         $SecondBytes = [int64]0
         $Seen = 0
         $Capped = $false
-        $NextUri = "$BaseUri/site/RecycleBin?`$select=Id,Size,ItemState&`$top=500&`$orderby=DeletedDate desc"
-
-        while ($NextUri) {
-            $Page = New-GraphGetRequest -uri $NextUri -tenantid $TenantFilter -scope $Scope -extraHeaders $JsonAccept -UseCertificate -AsApp $true -noPagination $true -SkipValueExtraction
+        while ($true) {
+            $Page = New-GraphGetRequest -uri "$BaseUri/site/RecycleBin?`$select=Id,Size,ItemState&`$top=500&`$skip=$($Start + $Seen)&`$orderby=DeletedDate desc" -tenantid $TenantFilter -scope $Scope -extraHeaders $JsonAccept -UseCertificate -AsApp $true -noPagination $true -SkipValueExtraction
             $Items = @()
-            $NextLink = $null
             if ($null -ne $Page.value) {
                 $Items = @($Page.value)
-                $NextLink = $Page.'@odata.nextLink'
             } elseif ($Page -is [System.Array]) {
                 $Items = @($Page)
             } elseif ($Page.PSObject.Properties.Name -contains 'Id') {
@@ -67,8 +68,7 @@ function Invoke-ListSiteRecycleBinSummary {
                 }
             }
 
-            if ($Capped -or [string]::IsNullOrWhiteSpace($NextLink)) { break }
-            $NextUri = $NextLink
+            if ($Capped -or $Items.Count -lt 500) { break }
         }
 
         $Body = [PSCustomObject]@{
@@ -82,16 +82,17 @@ function Invoke-ListSiteRecycleBinSummary {
             capped           = $Capped
             scannedItems     = $Seen
         }
+        $NextLink = if ($Capped) { [string]($Start + $Seen) }
         $StatusCode = [HttpStatusCode]::OK
     } catch {
         $ErrorMessage = Get-CippException -Exception $_
         $Body = "Failed to summarize recycle bin for $($SiteUrl): $($ErrorMessage.NormalizedError)"
         Write-LogMessage -Headers $Request.Headers -API $APIName -tenant $TenantFilter -message $Body -sev Error -LogData $ErrorMessage
-        $StatusCode = [HttpStatusCode]::BadRequest
+        $StatusCode = [HttpStatusCode]::InternalServerError
     }
 
     return ([HttpResponseContext]@{
             StatusCode = $StatusCode
-            Body       = @{ Results = $Body }
+            Body       = @{ Results = $Body; Metadata = @{ nextLink = $NextLink } }
         })
 }

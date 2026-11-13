@@ -1,7 +1,7 @@
 Function Invoke-ListTeamsActivity {
     <#
     .FUNCTIONALITY
-        Entrypoint
+        Entrypoint,TenantGroup
     .ROLE
         Teams.Activity.Read
     .DESCRIPTION
@@ -12,10 +12,24 @@ Function Invoke-ListTeamsActivity {
     # Interact with query parameters or the body of the request.
     $TenantFilter = $Request.Query.tenantFilter
     $type = $request.Query.Type
+    # Type is spliced into a Graph report URL and a cache type name, so only a bare report name is allowed
+    if ($type -and $type -notmatch '^[A-Za-z0-9]+$') {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ Results = 'Invalid Type' } })
+    }
     # Serve from the reporting database cache instead of live Graph. Much faster, especially for AllTenants.
     $UseReportDB = $Request.Query.UseReportDB -eq $true
     if ($TenantFilter -eq 'AllTenants' -or $UseReportDB) {
         try {
+            # Return one page per request as { Results, Metadata } with a continuation token in Metadata.nextLink.
+            if ($Request.Query.manualPagination -eq $true) {
+                # Cached rows per page, clamped between 250 and 10000. Defaults to 5000. Pages hold whole tenants.
+                $PageSize = $Request.Query.PageSize -as [int]
+                return ([HttpResponseContext]@{
+                        StatusCode = [HttpStatusCode]::OK
+                        # Continuation token from the previous page's Metadata.nextLink; opaque to callers.
+                        Body       = Get-CIPPReportPage -TenantFilter $TenantFilter -Type "TeamsActivity$type" -PageSize $PageSize -ContinuationToken $Request.Query.nextLink -Report { param($Tenant) Get-CIPPTeamsActivityReport -TenantFilter $Tenant -Type $type -ErrorAction Stop }
+                    })
+            }
             $GraphRequest = Get-CIPPTeamsActivityReport -TenantFilter $TenantFilter -Type $type -ErrorAction Stop
             $StatusCode = [HttpStatusCode]::OK
         } catch {
@@ -28,6 +42,9 @@ Function Invoke-ListTeamsActivity {
             })
     }
 
+    if (-not $type) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ Results = 'Type is required' } })
+    }
     $GraphRequest = New-GraphGetRequest -uri "https://graph.microsoft.com/beta/reports/get$($type)Detail(period='D30')" -tenantid $TenantFilter | ConvertFrom-Csv | Select-Object @{ Name = 'UPN'; Expression = { $_.'User Principal Name' } },
     @{ Name = 'LastActive'; Expression = { $_.'Last Activity Date' } },
     @{ Name = 'TeamsChat'; Expression = { $_.'Team Chat Message Count' } },

@@ -1,7 +1,7 @@
 function Invoke-ListConditionalAccessPolicies {
     <#
     .FUNCTIONALITY
-        Entrypoint
+        Entrypoint,TenantGroup
     .ROLE
         Tenant.ConditionalAccess.Read
     .DESCRIPTION
@@ -120,7 +120,7 @@ function Invoke-ListConditionalAccessPolicies {
             $Requests = @(
                 @{
                     id     = 'policies'
-                    url    = 'identity/conditionalAccess/policies'
+                    url    = 'identity/conditionalAccess/policies?$orderby=displayName'
                     method = 'GET'
                 }
                 @{
@@ -155,9 +155,13 @@ function Invoke-ListConditionalAccessPolicies {
                 }
             )
 
-            $BulkResults = New-GraphBulkRequest -Requests $Requests -tenantid $TenantFilter -asapp $true
+            $BulkResults = New-GraphBulkRequest -Requests $Requests -tenantid $TenantFilter -asapp $true -ErrorAction Stop
 
-            $ConditionalAccessPolicyOutput = ($BulkResults | Where-Object { $_.id -eq 'policies' }).body.value
+            $PoliciesResult = $BulkResults | Where-Object { $_.id -eq 'policies' }
+            if ($PoliciesResult.status -ge 400) {
+                throw ($PoliciesResult.body.error.message ?? "Graph returned status $($PoliciesResult.status) listing Conditional Access policies")
+            }
+            $ConditionalAccessPolicyOutput = $PoliciesResult.body.value
             $AllNamedLocations = ($BulkResults | Where-Object { $_.id -eq 'namedLocations' }).body.value
             $AllApplications = ($BulkResults | Where-Object { $_.id -eq 'applications' } ).body.value
             $AllRoleDefinitions = ($BulkResults | Where-Object { $_.id -eq 'roleDefinitions' }).body.value
@@ -274,14 +278,14 @@ function Invoke-ListConditionalAccessPolicies {
         $StatusCode = [HttpStatusCode]::OK
     } catch {
         $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-        $StatusCode = [HttpStatusCode]::Forbidden
-        $GraphRequest = $ErrorMessage
+        $StatusCode = [HttpStatusCode]::InternalServerError
+        $Body = $ErrorMessage
     }
 
     if (!$Body) {
         $StatusCode = [HttpStatusCode]::OK
         $Body = [PSCustomObject]@{
-            Results  = @($GraphRequest | Where-Object -Property id -NE $null | Sort-Object id -Descending)
+            Results  = @($GraphRequest | Where-Object -Property id -NE $null)
             Metadata = $Metadata
         }
     }

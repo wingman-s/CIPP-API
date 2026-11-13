@@ -49,12 +49,13 @@ function Invoke-CIPPStandardIntuneComplianceSettings {
             Select-Object secureByDefault, deviceComplianceCheckinThresholdDays
     } catch {
         $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-        Write-LogMessage -API 'Standards' -Tenant $Tenant -Message "Could not get the intuneDeviceReg state for $Tenant. Error: $ErrorMessage" -Sev Error
+        Write-LogMessage -API 'Standards' -Tenant $Tenant -Message "Could not get the IntuneComplianceSettings state for $Tenant. Error: $ErrorMessage" -Sev Error
         return
     }
 
     if ($null -eq $Settings.deviceComplianceCheckinThresholdDays) { $Settings.deviceComplianceCheckinThresholdDays = $CurrentState.deviceComplianceCheckinThresholdDays }
-    $SecureByDefault = [bool]($Settings.secureByDefault.value ? $Settings.secureByDefault.value : $Settings.secureByDefault)
+    # The option values are the strings 'true' / 'false'; a [bool] cast reads both as $true
+    $SecureByDefault = "$($Settings.secureByDefault.value ?? $Settings.secureByDefault)" -eq 'true'
     $DeviceComplianceCheckinThresholdDays = [int]$Settings.deviceComplianceCheckinThresholdDays
 
     $StateIsCorrect = ($CurrentState.secureByDefault -eq $SecureByDefault) -and
